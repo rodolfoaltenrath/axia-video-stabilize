@@ -52,6 +52,20 @@ test "rejects unsupported media extension" {
     );
 }
 
+test "preview size is bounded without upscaling" {
+    const full_hd = media.fitPreviewSize(1920, 1080, 960, 540);
+    try std.testing.expectEqual(@as(u32, 960), full_hd.width);
+    try std.testing.expectEqual(@as(u32, 540), full_hd.height);
+
+    const portrait = media.fitPreviewSize(1080, 1920, 960, 540);
+    try std.testing.expectEqual(@as(u32, 304), portrait.width);
+    try std.testing.expectEqual(@as(u32, 540), portrait.height);
+
+    const small = media.fitPreviewSize(640, 360, 960, 540);
+    try std.testing.expectEqual(@as(u32, 640), small.width);
+    try std.testing.expectEqual(@as(u32, 360), small.height);
+}
+
 test "parses ffprobe metadata" {
     const output =
         \\width=1920
@@ -72,6 +86,16 @@ test "rejects invalid ffprobe frame rate" {
         \\width=1920
         \\height=1080
         \\avg_frame_rate=30/0
+        \\duration=8.0
+    ;
+    try std.testing.expectError(error.InvalidFrameRate, ffmpeg_cli.parseProbeOutput(output));
+}
+
+test "rejects zero ffprobe frame rate numerator" {
+    const output =
+        \\width=1920
+        \\height=1080
+        \\avg_frame_rate=0/1
         \\duration=8.0
     ;
     try std.testing.expectError(error.InvalidFrameRate, ffmpeg_cli.parseProbeOutput(output));

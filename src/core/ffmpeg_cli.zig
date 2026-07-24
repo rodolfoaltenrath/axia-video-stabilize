@@ -258,7 +258,9 @@ pub fn parseProbeOutput(output: []const u8) CliError!ProbeInfo {
         }
     }
 
+    const numerator = rate_numerator orelse return error.InvalidProbeOutput;
     const denominator = rate_denominator orelse return error.InvalidProbeOutput;
+    if (numerator == 0) return error.InvalidFrameRate;
     if (denominator == 0) return error.InvalidFrameRate;
     const duration_seconds = duration orelse return error.InvalidProbeOutput;
     if (!std.math.isFinite(duration_seconds) or duration_seconds <= 0) return error.InvalidProbeOutput;
@@ -266,7 +268,7 @@ pub fn parseProbeOutput(output: []const u8) CliError!ProbeInfo {
     return .{
         .width = width orelse return error.InvalidProbeOutput,
         .height = height orelse return error.InvalidProbeOutput,
-        .frame_rate_numerator = rate_numerator orelse return error.InvalidProbeOutput,
+        .frame_rate_numerator = numerator,
         .frame_rate_denominator = denominator,
         .duration_seconds = duration_seconds,
         .frame_count = frame_count,

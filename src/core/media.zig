@@ -6,6 +6,11 @@ pub const MediaError = error{
     OutputPathTooLong,
 };
 
+pub const PreviewSize = struct {
+    width: u32,
+    height: u32,
+};
+
 const supported_extensions = [_][]const u8{
     ".mp4",
     ".mov",
@@ -32,4 +37,31 @@ pub fn deriveOutputPath(buffer: []u8, input_path: []const u8) MediaError![]const
     const extension = std.fs.path.extension(input_path);
     const stem_path = input_path[0 .. input_path.len - extension.len];
     return std.fmt.bufPrint(buffer, "{s}-stabilized.mp4", .{stem_path}) catch error.OutputPathTooLong;
+}
+
+pub fn fitPreviewSize(
+    source_width: u32,
+    source_height: u32,
+    maximum_width: u32,
+    maximum_height: u32,
+) PreviewSize {
+    if (source_width == 0 or source_height == 0) return .{ .width = 2, .height = 2 };
+
+    const width_scale = @as(f64, @floatFromInt(maximum_width)) /
+        @as(f64, @floatFromInt(source_width));
+    const height_scale = @as(f64, @floatFromInt(maximum_height)) /
+        @as(f64, @floatFromInt(source_height));
+    const scale = @min(1.0, @min(width_scale, height_scale));
+    return .{
+        .width = evenDimension(@intFromFloat(@max(2.0, @round(
+            @as(f64, @floatFromInt(source_width)) * scale,
+        )))),
+        .height = evenDimension(@intFromFloat(@max(2.0, @round(
+            @as(f64, @floatFromInt(source_height)) * scale,
+        )))),
+    };
+}
+
+fn evenDimension(value: u32) u32 {
+    return value - value % 2;
 }
