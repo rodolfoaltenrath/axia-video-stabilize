@@ -2,6 +2,7 @@ const std = @import("std");
 const rl = @import("raylib");
 const app_state = @import("app_state.zig");
 const media = @import("core/media.zig");
+const file_dialog = @import("platform/file_dialog.zig");
 const thread_pool = @import("utils/thread_pool.zig");
 const fonts = @import("ui/fonts.zig");
 const window = @import("ui/window.zig");
@@ -28,7 +29,6 @@ pub fn main() !void {
     defer fonts.deinit();
 
     while (!rl.windowShouldClose()) {
-        handleDroppedMedia(&state);
         const snapshot = state.snapshot();
 
         rl.beginDrawing();
@@ -36,25 +36,34 @@ pub fn main() !void {
         rl.endDrawing();
 
         state.setParameters(result.parameters);
+        if (result.import_requested) importVideo(allocator, &state);
         if (result.cancel_requested) state.requestCancel();
         if (result.start_requested) _ = workers.submit();
     }
 }
 
-fn handleDroppedMedia(state: *app_state.AppState) void {
-    if (!rl.isFileDropped()) return;
-    const files = rl.loadDroppedFiles();
-    defer rl.unloadDroppedFiles(files);
-    if (files.count == 0 or files.paths == null or files.paths[0] == null) return;
+fn importVideo(allocator: std.mem.Allocator, state: *app_state.AppState) void {
+    const selected_path = file_dialog.selectVideo(allocator, rl.getWindowHandle()) catch |err| {
+        state.setMessage(switch (err) {
+            error.UnsupportedPlatform => "A importação por seletor ainda não está disponível neste sistema.",
+            error.DialogFailed => "O Windows não conseguiu abrir o seletor de vídeos.",
+            error.InvalidPathEncoding => "O caminho selecionado não pôde ser interpretado.",
+            error.OutOfMemory => "Não há memória suficiente para importar o vídeo.",
+        });
+        return;
+    } orelse return;
+    defer allocator.free(selected_path);
 
-    const raw_path: [*:0]const u8 = @ptrCast(files.paths[0]);
-    const input_path = std.mem.span(raw_path);
+    loadMedia(state, selected_path);
+}
+
+fn loadMedia(state: *app_state.AppState, input_path: []const u8) void {
     var output_buffer: [app_state.max_path_bytes]u8 = undefined;
     const output_path = media.deriveOutputPath(&output_buffer, input_path) catch |err| {
         state.setMessage(switch (err) {
             error.UnsupportedFormat => "Formato não suportado. Use MP4, MOV, MKV, AVI, WebM, M4V, MTS ou M2TS.",
             error.OutputPathTooLong => "O caminho do vídeo é longo demais.",
-            error.EmptyPath => "O arquivo arrastado não possui um caminho válido.",
+            error.EmptyPath => "O arquivo selecionado não possui um caminho válido.",
         });
         return;
     };

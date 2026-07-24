@@ -30,9 +30,9 @@ zig build -Doptimize=ReleaseFast
 zig build test
 ```
 
-After starting the application, drag a supported video into the window. Axia
-will analyze the clip frame by frame, report live frame progress and export
-`<input-name>-stabilized.mp4` beside the original.
+After starting the application, select **Importar vídeo** and choose a supported
+file. Axia will analyze the clip frame by frame, report live frame progress and
+export `<input-name>-stabilized.mp4` beside the original.
 
 Enable native video libraries when installed in standard system locations:
 

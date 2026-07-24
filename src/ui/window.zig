@@ -6,6 +6,7 @@ const theme = @import("theme.zig");
 
 pub const UiResult = struct {
     parameters: state_mod.Parameters,
+    import_requested: bool = false,
     start_requested: bool = false,
     cancel_requested: bool = false,
 };
@@ -19,7 +20,7 @@ pub fn draw(snapshot: state_mod.Snapshot) UiResult {
     const pad: f32 = 16;
 
     rl.clearBackground(theme.background);
-    const top_start_requested = drawTopBar(width, top_h, snapshot);
+    const top_actions = drawTopBar(width, top_h, snapshot);
 
     const preview_area = rl.Rectangle{
         .x = pad,
@@ -36,7 +37,8 @@ pub fn draw(snapshot: state_mod.Snapshot) UiResult {
         .height = height - top_h - pad * 2,
     };
     var result = drawParameters(panel, snapshot);
-    result.start_requested = result.start_requested or top_start_requested;
+    result.import_requested = top_actions.import_requested;
+    result.start_requested = result.start_requested or top_actions.start_requested;
 
     const timeline = rl.Rectangle{
         .x = pad,
@@ -48,7 +50,12 @@ pub fn draw(snapshot: state_mod.Snapshot) UiResult {
     return result;
 }
 
-fn drawTopBar(width: f32, height: f32, snapshot: state_mod.Snapshot) bool {
+const TopBarActions = struct {
+    import_requested: bool,
+    start_requested: bool,
+};
+
+fn drawTopBar(width: f32, height: f32, snapshot: state_mod.Snapshot) TopBarActions {
     rl.drawRectangleRec(.{ .x = 0, .y = 0, .width = width, .height = height }, theme.surface);
     rl.drawLineEx(.{ .x = 0, .y = height }, .{ .x = width, .y = height }, 1, theme.border);
     rl.drawCircleV(.{ .x = 30, .y = 32 }, 13, theme.accent);
@@ -56,13 +63,21 @@ fn drawTopBar(width: f32, height: f32, snapshot: state_mod.Snapshot) bool {
     components.textStrong("AXIA", 54, 19, 18, theme.text);
     components.text("WORKSPACE", 55, 40, 10, theme.text_muted);
 
-    _ = components.button(.{ .x = width - 292, .y = 14, .width = 118, .height = 38 }, "ARRASTE VIDEO", .secondary, false);
-    return components.button(
-        .{ .x = width - 162, .y = 14, .width = 146, .height = 38 },
-        "ESTABILIZAR",
-        .primary,
-        snapshot.media.hasInput() and !snapshot.phase.isBusy(),
-    );
+    const busy = snapshot.phase.isBusy();
+    return .{
+        .import_requested = components.button(
+            .{ .x = width - 306, .y = 14, .width = 132, .height = 38 },
+            "IMPORTAR VÍDEO",
+            .secondary,
+            !busy,
+        ),
+        .start_requested = components.button(
+            .{ .x = width - 162, .y = 14, .width = 146, .height = 38 },
+            "ESTABILIZAR",
+            .primary,
+            snapshot.media.hasInput() and !busy,
+        ),
+    };
 }
 
 fn drawPreview(area: rl.Rectangle, snapshot: state_mod.Snapshot) void {
@@ -90,7 +105,7 @@ fn drawPreview(area: rl.Rectangle, snapshot: state_mod.Snapshot) void {
     if (snapshot.media.hasInput()) {
         components.text(snapshot.media.name(), viewport.x + 18, viewport.y + viewport.height - 30, 12, rl.Color.init(210, 218, 229, 180));
     } else {
-        components.text("ARRASTE UM VÍDEO PARA ESTA JANELA", viewport.x + 18, viewport.y + viewport.height - 30, 12, rl.Color.init(210, 218, 229, 180));
+        components.text("IMPORTE UM VÍDEO PARA COMEÇAR", viewport.x + 18, viewport.y + viewport.height - 30, 12, rl.Color.init(210, 218, 229, 180));
     }
 }
 
@@ -136,7 +151,7 @@ fn drawParameters(panel: rl.Rectangle, snapshot: state_mod.Snapshot) UiResult {
         components.text("Movimento global via libvidstab.", note.x + 12, note.y + 31, 12, theme.text_muted);
         components.text("Saída MP4 ao lado do original.", note.x + 12, note.y + 47, 12, theme.text_muted);
     } else {
-        components.text("Arraste um vídeo para começar.", note.x + 12, note.y + 31, 12, theme.text_muted);
+        components.text("Clique em Importar vídeo.", note.x + 12, note.y + 31, 12, theme.text_muted);
         components.text("MP4, MOV, MKV, AVI, WebM, MTS.", note.x + 12, note.y + 47, 12, theme.text_muted);
     }
 

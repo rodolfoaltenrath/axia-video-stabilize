@@ -51,7 +51,10 @@ pub fn build(b: *std.Build) void {
     // raylib links the platform windowing dependencies. These explicit OpenGL
     // links document and enforce the desktop renderer requested by the app.
     switch (target.result.os.tag) {
-        .windows => exe.linkSystemLibrary("opengl32"),
+        .windows => {
+            exe.linkSystemLibrary("opengl32");
+            exe.linkSystemLibrary("comdlg32");
+        },
         .linux => {
             exe.linkSystemLibrary("GL");
             exe.linkSystemLibrary("pthread");
