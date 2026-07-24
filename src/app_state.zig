@@ -85,6 +85,9 @@ pub const Snapshot = struct {
     media: MediaSelection,
     message: [max_message_bytes:0]u8,
     message_len: usize,
+    processed_frame: u64,
+    total_frames: ?u64,
+    processing_speed: f32,
 
     pub fn status(self: *const Snapshot) [:0]const u8 {
         if (self.message_len > 0) return self.message[0..self.message_len :0];
@@ -101,6 +104,9 @@ pub const AppState = struct {
     media: MediaSelection = .{},
     message: [max_message_bytes:0]u8 = [_:0]u8{0} ** max_message_bytes,
     message_len: usize = 0,
+    processed_frame: u64 = 0,
+    total_frames: ?u64 = null,
+    processing_speed: f32 = 0,
 
     pub fn snapshot(self: *AppState) Snapshot {
         self.mutex.lock();
@@ -113,6 +119,9 @@ pub const AppState = struct {
             .media = self.media,
             .message = self.message,
             .message_len = self.message_len,
+            .processed_frame = self.processed_frame,
+            .total_frames = self.total_frames,
+            .processing_speed = self.processing_speed,
         };
     }
 
@@ -140,6 +149,9 @@ pub const AppState = struct {
         self.phase = .idle;
         self.progress = 0.0;
         self.cancel_requested = false;
+        self.processed_frame = 0;
+        self.total_frames = null;
+        self.processing_speed = 0;
         self.setMessageLocked("Mídia carregada. Ajuste os parâmetros e inicie a análise.");
         return true;
     }
@@ -157,6 +169,9 @@ pub const AppState = struct {
         self.phase = .loading;
         self.progress = 0.0;
         self.cancel_requested = false;
+        self.processed_frame = 0;
+        self.total_frames = null;
+        self.processing_speed = 0;
         self.setMessageLocked("");
         return .{ .parameters = self.parameters, .media = self.media };
     }
@@ -167,6 +182,24 @@ pub const AppState = struct {
         self.phase = phase;
         self.progress = std.math.clamp(progress, 0.0, 1.0);
         if (phase.isBusy()) self.setMessageLocked("");
+    }
+
+    pub fn updateFrameProgress(
+        self: *AppState,
+        phase: Phase,
+        progress: f32,
+        processed_frame: u64,
+        total_frames: u64,
+        processing_speed: f64,
+    ) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.phase = phase;
+        self.progress = std.math.clamp(progress, 0.0, 1.0);
+        self.processed_frame = @min(processed_frame, total_frames);
+        self.total_frames = total_frames;
+        self.processing_speed = @floatCast(@max(0.0, processing_speed));
+        self.setMessageLocked("");
     }
 
     pub fn fail(self: *AppState, message: []const u8) void {

@@ -42,9 +42,17 @@ pub fn main() !void {
     defer std.fs.deleteFileAbsolute(transform_path) catch {};
 
     std.debug.print("Axia: analisando movimento (passo 1/2)\n", .{});
-    try ffmpeg_cli.analyze(allocator, input_path, temp_directory, transform_name);
+    var analyze_progress = CliProgress{ .label = "análise", .total_frames = info.estimatedFrameCount() };
+    try ffmpeg_cli.analyze(
+        allocator,
+        input_path,
+        temp_directory,
+        transform_name,
+        analyze_progress.observer(),
+    );
 
     std.debug.print("Axia: estabilizando e exportando (passo 2/2)\n", .{});
+    var render_progress = CliProgress{ .label = "render", .total_frames = info.estimatedFrameCount() };
     try ffmpeg_cli.render(
         allocator,
         input_path,
@@ -53,9 +61,27 @@ pub fn main() !void {
         transform_name,
         .{},
         info,
+        render_progress.observer(),
     );
     std.debug.print("Axia: concluído em {s}\n", .{output_path});
 }
+
+const CliProgress = struct {
+    label: []const u8,
+    total_frames: u64,
+
+    fn observer(self: *CliProgress) ffmpeg_cli.Observer {
+        return .{ .context = self, .on_progress = onProgress };
+    }
+
+    fn onProgress(raw_context: ?*anyopaque, progress: ffmpeg_cli.Progress) void {
+        const self: *CliProgress = @ptrCast(@alignCast(raw_context.?));
+        std.debug.print(
+            "Axia: {s} frame {d}/{d} ({d:.1}x)\n",
+            .{ self.label, @min(progress.frame, self.total_frames), self.total_frames, progress.speed },
+        );
+    }
+};
 
 fn getTempDirectory(allocator: std.mem.Allocator) ![]u8 {
     return std.process.getEnvVarOwned(allocator, "TEMP") catch |err| switch (err) {

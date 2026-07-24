@@ -69,6 +69,11 @@ pub const ThreadPool = struct {
 
     fn runPipeline(self: *ThreadPool, config: state_mod.JobConfig) void {
         self.runPipelineFallible(config) catch |err| {
+            if (err == error.Cancelled) {
+                self.state.update(.cancelled, 0.0);
+                self.state.setMessage("Processamento cancelado.");
+                return;
+            }
             std.log.err("stabilization pipeline failed: {s}", .{@errorName(err)});
             self.state.fail(messageForError(err));
         };
@@ -79,6 +84,7 @@ pub const ThreadPool = struct {
 
         self.state.update(.loading, 0.02);
         const info = try ffmpeg_cli.probe(self.allocator, config.media.input());
+        const total_frames = info.estimatedFrameCount();
         self.state.update(.loading, 0.08);
         if (self.finishIfCancelled()) return;
 
@@ -94,18 +100,35 @@ pub const ThreadPool = struct {
         defer self.allocator.free(transform_path);
         defer std.fs.deleteFileAbsolute(transform_path) catch {};
 
-        self.state.update(.analyzing, 0.10);
+        var analyze_progress = StageProgress{
+            .state = self.state,
+            .phase = .analyzing,
+            .start = 0.10,
+            .end = 0.67,
+            .total_frames = total_frames,
+            .duration_seconds = info.duration_seconds,
+        };
+        self.state.updateFrameProgress(.analyzing, 0.10, 0, total_frames, 0);
         try ffmpeg_cli.analyze(
             self.allocator,
             config.media.input(),
             temp_directory,
             transform_name,
+            analyze_progress.observer(),
         );
-        self.state.update(.analyzing, 0.67);
+        self.state.updateFrameProgress(.analyzing, 0.67, total_frames, total_frames, 0);
         if (self.finishIfCancelled()) return;
 
         self.state.update(.smoothing, 0.72);
-        self.state.update(.rendering, 0.74);
+        var render_progress = StageProgress{
+            .state = self.state,
+            .phase = .rendering,
+            .start = 0.74,
+            .end = 1.0,
+            .total_frames = total_frames,
+            .duration_seconds = info.duration_seconds,
+        };
+        self.state.updateFrameProgress(.rendering, 0.74, 0, total_frames, 0);
         try ffmpeg_cli.render(
             self.allocator,
             config.media.input(),
@@ -114,6 +137,7 @@ pub const ThreadPool = struct {
             transform_name,
             config.parameters,
             info,
+            render_progress.observer(),
         );
         if (self.finishIfCancelled()) {
             std.fs.deleteFileAbsolute(config.media.output()) catch {};
@@ -147,3 +171,47 @@ fn messageForError(err: anyerror) []const u8 {
         else => "Falha inesperada no pipeline de estabilização.",
     };
 }
+
+const StageProgress = struct {
+    state: *state_mod.AppState,
+    phase: state_mod.Phase,
+    start: f32,
+    end: f32,
+    total_frames: u64,
+    duration_seconds: f64,
+
+    fn observer(self: *StageProgress) ffmpeg_cli.Observer {
+        return .{
+            .context = self,
+            .on_progress = onProgress,
+            .should_cancel = shouldCancel,
+        };
+    }
+
+    fn onProgress(raw_context: ?*anyopaque, progress: ffmpeg_cli.Progress) void {
+        const self: *StageProgress = @ptrCast(@alignCast(raw_context.?));
+        var ratio: f64 = 0;
+        if (progress.finished) {
+            ratio = 1;
+        } else if (self.total_frames > 0 and progress.frame > 0) {
+            ratio = @as(f64, @floatFromInt(progress.frame)) /
+                @as(f64, @floatFromInt(self.total_frames));
+        } else if (self.duration_seconds > 0 and progress.out_time_us > 0) {
+            ratio = @as(f64, @floatFromInt(progress.out_time_us)) /
+                (self.duration_seconds * std.time.us_per_s);
+        }
+        const normalized: f32 = @floatCast(std.math.clamp(ratio, 0.0, 1.0));
+        self.state.updateFrameProgress(
+            self.phase,
+            self.start + (self.end - self.start) * normalized,
+            progress.frame,
+            self.total_frames,
+            progress.speed,
+        );
+    }
+
+    fn shouldCancel(raw_context: ?*anyopaque) bool {
+        const self: *StageProgress = @ptrCast(@alignCast(raw_context.?));
+        return self.state.shouldCancel();
+    }
+};

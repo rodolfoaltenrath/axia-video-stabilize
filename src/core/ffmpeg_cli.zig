@@ -9,6 +9,7 @@ pub const CliError = error{
     AnalyzeFailed,
     RenderFailed,
     InvalidFrameRate,
+    Cancelled,
 };
 
 pub const ProbeInfo = struct {
@@ -22,6 +23,57 @@ pub const ProbeInfo = struct {
     pub fn framesPerSecond(self: ProbeInfo) f64 {
         return @as(f64, @floatFromInt(self.frame_rate_numerator)) /
             @as(f64, @floatFromInt(self.frame_rate_denominator));
+    }
+
+    pub fn estimatedFrameCount(self: ProbeInfo) u64 {
+        if (self.frame_count) |count| return count;
+        return @intFromFloat(@max(1.0, @round(self.duration_seconds * self.framesPerSecond())));
+    }
+};
+
+pub const Progress = struct {
+    frame: u64 = 0,
+    out_time_us: u64 = 0,
+    speed: f64 = 0,
+    finished: bool = false,
+};
+
+pub const Observer = struct {
+    context: ?*anyopaque = null,
+    on_progress: ?*const fn (?*anyopaque, Progress) void = null,
+    should_cancel: ?*const fn (?*anyopaque) bool = null,
+
+    fn report(self: Observer, progress: Progress) void {
+        if (self.on_progress) |callback| callback(self.context, progress);
+    }
+
+    fn isCancelled(self: Observer) bool {
+        if (self.should_cancel) |callback| return callback(self.context);
+        return false;
+    }
+};
+
+pub const ProgressParser = struct {
+    current: Progress = .{},
+
+    pub fn push(self: *ProgressParser, raw_line: []const u8) ?Progress {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        const separator = std.mem.indexOfScalar(u8, line, '=') orelse return null;
+        const key = line[0..separator];
+        const value = line[separator + 1 ..];
+
+        if (std.mem.eql(u8, key, "frame")) {
+            self.current.frame = std.fmt.parseUnsigned(u64, value, 10) catch self.current.frame;
+        } else if (std.mem.eql(u8, key, "out_time_us")) {
+            self.current.out_time_us = std.fmt.parseUnsigned(u64, value, 10) catch self.current.out_time_us;
+        } else if (std.mem.eql(u8, key, "speed")) {
+            const speed_text = std.mem.trimRight(u8, std.mem.trim(u8, value, " \t"), "x");
+            self.current.speed = std.fmt.parseFloat(f64, speed_text) catch self.current.speed;
+        } else if (std.mem.eql(u8, key, "progress")) {
+            self.current.finished = std.mem.eql(u8, value, "end");
+            return self.current;
+        }
+        return null;
     }
 };
 
@@ -59,6 +111,7 @@ pub fn analyze(
     input_path: []const u8,
     working_directory: []const u8,
     transform_file_name: []const u8,
+    observer: Observer,
 ) !void {
     const executable_override = std.process.getEnvVarOwned(allocator, "AXIA_FFMPEG") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
@@ -80,6 +133,10 @@ pub fn analyze(
         "-loglevel",
         "error",
         "-nostdin",
+        "-stats_period",
+        "0.1",
+        "-progress",
+        "pipe:1",
         "-y",
         "-i",
         input_path,
@@ -92,12 +149,10 @@ pub fn analyze(
         "null",
         "-",
     };
-    const result = run(allocator, &argv, working_directory, error.AnalyzeFailed) catch |err| switch (err) {
+    runWithProgress(allocator, &argv, working_directory, error.AnalyzeFailed, observer) catch |err| switch (err) {
         error.FileNotFound => return error.ToolNotFound,
         else => return err,
     };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
 }
 
 pub fn render(
@@ -108,6 +163,7 @@ pub fn render(
     transform_file_name: []const u8,
     parameters: state_mod.Parameters,
     info: ProbeInfo,
+    observer: Observer,
 ) !void {
     const executable_override = std.process.getEnvVarOwned(allocator, "AXIA_FFMPEG") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
@@ -134,6 +190,10 @@ pub fn render(
         "-loglevel",
         "error",
         "-nostdin",
+        "-stats_period",
+        "0.1",
+        "-progress",
+        "pipe:1",
         "-y",
         "-i",
         input_path,
@@ -161,12 +221,10 @@ pub fn render(
         "+faststart",
         output_path,
     };
-    const result = run(allocator, &argv, working_directory, error.RenderFailed) catch |err| switch (err) {
+    runWithProgress(allocator, &argv, working_directory, error.RenderFailed, observer) catch |err| switch (err) {
         error.FileNotFound => return error.ToolNotFound,
         else => return err,
     };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
 }
 
 pub fn parseProbeOutput(output: []const u8) CliError!ProbeInfo {
@@ -239,4 +297,50 @@ fn run(
         return failure;
     }
     return result;
+}
+
+fn runWithProgress(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    working_directory: ?[]const u8,
+    failure: CliError,
+    observer: Observer,
+) !void {
+    if (observer.isCancelled()) return error.Cancelled;
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+    child.cwd = working_directory;
+    child.expand_arg0 = .expand;
+    try child.spawn();
+
+    var terminated = false;
+    errdefer {
+        if (!terminated) {
+            _ = child.kill() catch {};
+        }
+    }
+
+    var parser = ProgressParser{};
+    var line_buffer: [512]u8 = undefined;
+    const stdout = child.stdout orelse return failure;
+    var reader = stdout.reader();
+    while (try reader.readUntilDelimiterOrEof(&line_buffer, '\n')) |line| {
+        if (observer.isCancelled()) {
+            _ = try child.kill();
+            terminated = true;
+            return error.Cancelled;
+        }
+        if (parser.push(line)) |progress| observer.report(progress);
+    }
+
+    const term = try child.wait();
+    terminated = true;
+    const success = switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+    if (!success) return failure;
 }

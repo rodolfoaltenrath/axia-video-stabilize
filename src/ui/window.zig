@@ -159,7 +159,20 @@ fn drawTimeline(area: rl.Rectangle, snapshot: state_mod.Snapshot) void {
     rl.drawRectangleRounded(area, 0.025, 10, theme.surface);
     rl.drawRectangleRoundedLinesEx(area, 0.025, 10, 1, theme.border);
     components.text("TIMELINE", area.x + 18, area.y + 14, 12, theme.text_muted);
-    components.text("00:00:00:00", area.x + area.width - 104, area.y + 14, 12, theme.text);
+    var frame_buffer: [48]u8 = undefined;
+    const frame_text = if (snapshot.total_frames) |total|
+        if (snapshot.processing_speed > 0)
+            std.fmt.bufPrintZ(
+                &frame_buffer,
+                "FRAME {d} / {d}  {d:.1}x",
+                .{ snapshot.processed_frame, total, snapshot.processing_speed },
+            ) catch "FRAME --"
+        else
+            std.fmt.bufPrintZ(&frame_buffer, "FRAME {d} / {d}", .{ snapshot.processed_frame, total }) catch "FRAME --"
+    else
+        "00:00:00:00";
+    const frame_measure = @as(f32, @floatFromInt(frame_text.len)) * 7.0;
+    components.text(frame_text, area.x + area.width - frame_measure - 18, area.y + 14, 12, theme.text);
 
     const track = rl.Rectangle{ .x = area.x + 18, .y = area.y + 43, .width = area.width - 36, .height = 72 };
     rl.drawRectangleRounded(track, 0.06, 8, theme.surface_alt);
