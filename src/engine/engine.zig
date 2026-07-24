@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 
 pub const types = @import("types.zig");
 pub const decoder = @import("decoder.zig");
+pub const features = @import("features.zig");
 
 pub const Backend = enum {
     legacy,

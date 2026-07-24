@@ -13,6 +13,8 @@ zig-out/
 *.pdb
 *.ilk
 *.exp
+__pycache__/
+*.py[cod]
 
 # Internal planning and implementation notes
 /docs/

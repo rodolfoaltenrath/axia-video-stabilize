@@ -8,6 +8,7 @@ const tracker = @import("core/tracker.zig");
 const trajectory = @import("core/trajectory.zig");
 const engine = @import("engine/engine.zig");
 const decoder = engine.decoder;
+const features = engine.features;
 const engine_types = engine.types;
 
 test "accumulates camera motion" {
@@ -367,6 +368,94 @@ test "analysis dimensions preserve aspect ratio without upscaling" {
     const small = try decoder.fitAnalysisDimensions(640, 360, 960);
     try std.testing.expectEqual(@as(u32, 640), small.width);
     try std.testing.expectEqual(@as(u32, 360), small.height);
+}
+
+test "feature grid covers non-divisible image dimensions exactly" {
+    const options = features.Options{
+        .grid_columns = 3,
+        .grid_rows = 2,
+        .max_per_cell = 5,
+    };
+
+    const first = try features.gridCell(101, 55, options, 0, 0);
+    const middle = try features.gridCell(101, 55, options, 1, 0);
+    const last = try features.gridCell(101, 55, options, 2, 1);
+
+    try std.testing.expectEqual(@as(usize, 0), first.x);
+    try std.testing.expectEqual(@as(usize, 33), first.width);
+    try std.testing.expectEqual(@as(usize, 33), middle.x);
+    try std.testing.expectEqual(@as(usize, 34), middle.width);
+    try std.testing.expectEqual(@as(usize, 67), last.x);
+    try std.testing.expectEqual(@as(usize, 34), last.width);
+    try std.testing.expectEqual(@as(usize, 27), last.y);
+    try std.testing.expectEqual(@as(usize, 28), last.height);
+    try std.testing.expectEqual(@as(usize, 30), try features.requiredCapacity(options));
+}
+
+test "feature options reject an unbounded grid" {
+    try std.testing.expectError(
+        error.InvalidOptions,
+        features.requiredCapacity(.{ .grid_columns = 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        features.requiredCapacity(.{ .quality_level = 1.1 }),
+    );
+}
+
+test "native Shi-Tomasi detector preserves spatial coverage" {
+    if (!features.native_enabled) return error.SkipZigTest;
+
+    const width = 120;
+    const height = 90;
+    const options = features.Options{
+        .grid_columns = 4,
+        .grid_rows = 3,
+        .max_per_cell = 8,
+        .quality_level = 0.01,
+        .min_distance = 2,
+        .block_size = 3,
+        .border = 0,
+    };
+    var image = [_]u8{0} ** (width * height);
+
+    // One high-contrast square per cell provides four known corners while
+    // leaving the detector free to choose their precise subpixel ordering.
+    for (0..@as(usize, options.grid_rows)) |row| {
+        for (0..@as(usize, options.grid_columns)) |column| {
+            const cell = try features.gridCell(width, height, options, column, row);
+            const left = cell.x + cell.width / 2 - 5;
+            const top = cell.y + cell.height / 2 - 5;
+            for (top..top + 10) |y| {
+                @memset(image[y * width + left .. y * width + left + 10], 255);
+            }
+        }
+    }
+
+    var storage: [96]features.Point = undefined;
+    const points = try features.detectDistributed(
+        &image,
+        width,
+        height,
+        width,
+        &storage,
+        options,
+    );
+    try std.testing.expect(points.len >= 4 * 3);
+
+    var occupied = [_]bool{false} ** 12;
+    for (points) |point| {
+        const column = @min(
+            @as(usize, @intFromFloat(point.x)) * options.grid_columns / width,
+            @as(usize, options.grid_columns - 1),
+        );
+        const row = @min(
+            @as(usize, @intFromFloat(point.y)) * options.grid_rows / height,
+            @as(usize, options.grid_rows - 1),
+        );
+        occupied[row * options.grid_columns + column] = true;
+    }
+    for (occupied) |has_corner| try std.testing.expect(has_corner);
 }
 
 test "native decoder reports a missing input without leaking ownership" {

@@ -26,8 +26,12 @@ pub fn build(b: *std.Build) void {
     const native_lib = b.option([]const u8, "native-lib", "Directory containing FFmpeg/OpenCV libraries");
     const ffmpeg_include_option = b.option([]const u8, "ffmpeg-include", "Directory containing FFmpeg headers");
     const ffmpeg_lib_option = b.option([]const u8, "ffmpeg-lib", "Directory containing FFmpeg libraries");
+    const opencv_include_option = b.option([]const u8, "opencv-include", "Directory containing OpenCV headers");
+    const opencv_lib_option = b.option([]const u8, "opencv-lib", "Directory containing OpenCV libraries");
     const ffmpeg_include = if (ffmpeg_include_option) |path| path else native_include;
     const ffmpeg_lib = if (ffmpeg_lib_option) |path| path else native_lib;
+    const opencv_include = if (opencv_include_option) |path| path else native_include;
+    const opencv_lib = if (opencv_lib_option) |path| path else native_lib;
     const test_video = b.option([]const u8, "test-video", "Video fixture for native decoder tests") orelse "";
     const test_video_frames = b.option(u64, "test-video-frames", "Expected decoded fixture frame count") orelse 0;
     const test_video_require_vfr = b.option(bool, "test-video-require-vfr", "Require varying fixture PTS deltas") orelse false;
@@ -60,13 +64,16 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(raylib_dep.artifact("raylib"));
     exe.linkLibC();
     linkNativeDependencies(
+        b,
         exe,
         native_ffmpeg,
         native_opencv,
         ffmpeg_include,
         ffmpeg_lib,
-        native_include,
-        native_lib,
+        opencv_include,
+        opencv_lib,
+        b.path("native/opencv_bridge.cpp"),
+        b.path("native"),
     );
 
     // raylib links the platform windowing dependencies. These explicit OpenGL
@@ -95,13 +102,16 @@ pub fn build(b: *std.Build) void {
     cli.root_module.addOptions("build_options", build_options);
     cli.linkLibC();
     linkNativeDependencies(
+        b,
         cli,
         native_ffmpeg,
         native_opencv,
         ffmpeg_include,
         ffmpeg_lib,
-        native_include,
-        native_lib,
+        opencv_include,
+        opencv_lib,
+        b.path("native/opencv_bridge.cpp"),
+        b.path("native"),
     );
     b.installArtifact(cli);
 
@@ -124,13 +134,16 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addOptions("build_options", build_options);
     unit_tests.linkLibC();
     linkNativeDependencies(
+        b,
         unit_tests,
         native_ffmpeg,
         native_opencv,
         ffmpeg_include,
         ffmpeg_lib,
-        native_include,
-        native_lib,
+        opencv_include,
+        opencv_lib,
+        b.path("native/opencv_bridge.cpp"),
+        b.path("native"),
     );
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -138,13 +151,16 @@ pub fn build(b: *std.Build) void {
 }
 
 fn linkNativeDependencies(
+    b: *std.Build,
     artifact: *std.Build.Step.Compile,
     native_ffmpeg: bool,
     native_opencv: bool,
     ffmpeg_include: ?[]const u8,
     ffmpeg_lib: ?[]const u8,
-    native_include: ?[]const u8,
-    native_lib: ?[]const u8,
+    opencv_include: ?[]const u8,
+    opencv_lib: ?[]const u8,
+    opencv_bridge: std.Build.LazyPath,
+    bridge_include: std.Build.LazyPath,
 ) void {
     if (native_ffmpeg) {
         if (ffmpeg_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
@@ -156,11 +172,33 @@ fn linkNativeDependencies(
     }
 
     if (native_opencv) {
-        if (native_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
-        if (native_lib) |path| artifact.addLibraryPath(.{ .cwd_relative = path });
-        artifact.linkSystemLibrary("opencv_core");
-        artifact.linkSystemLibrary("opencv_imgproc");
-        artifact.linkSystemLibrary("opencv_video");
-        artifact.linkSystemLibrary("opencv_calib3d");
+        if (opencv_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
+        artifact.addIncludePath(bridge_include);
+        artifact.addCSourceFile(.{
+            .file = opencv_bridge,
+            .flags = &.{ "-std=c++17", "-fexceptions" },
+        });
+        artifact.linkLibCpp();
+
+        // OpenCV's MinGW naming includes the ABI version in import libraries.
+        // Keep these explicit: accidentally resolving MSVC binaries would make
+        // the C++ side of the bridge ABI-incompatible with Zig.
+        if (opencv_lib) |path| {
+            for ([_][]const u8{
+                "libopencv_core4130.dll.a",
+                "libopencv_imgproc4130.dll.a",
+                "libopencv_video4130.dll.a",
+                "libopencv_calib3d4130.dll.a",
+            }) |library| {
+                artifact.addObjectFile(.{
+                    .cwd_relative = b.pathJoin(&.{ path, library }),
+                });
+            }
+        } else {
+            artifact.linkSystemLibrary("opencv_core4130");
+            artifact.linkSystemLibrary("opencv_imgproc4130");
+            artifact.linkSystemLibrary("opencv_video4130");
+            artifact.linkSystemLibrary("opencv_calib3d4130");
+        }
     }
 }
