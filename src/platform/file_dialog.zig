@@ -15,10 +15,7 @@ pub const FileDialogError = error{
     InvalidPathEncoding,
 } || std.mem.Allocator.Error;
 
-pub fn selectVideo(
-    allocator: std.mem.Allocator,
-    window_handle: *anyopaque,
-) FileDialogError!?[]u8 {
+pub fn selectVideo(allocator: std.mem.Allocator) FileDialogError!?[]u8 {
     if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
 
     var path_buffer: [32768]windows.WCHAR = [_]windows.WCHAR{0} ** 32768;
@@ -27,9 +24,10 @@ pub fn selectVideo(
     );
     const title = std.unicode.utf8ToUtf16LeStringLiteral("Importar vídeo");
 
+    // Keep hwndOwner null. Windows handles are opaque values and Zig's C
+    // binding can reject a valid Raylib HWND when it enforces pointee alignment.
     var dialog: windows.OPENFILENAMEW = std.mem.zeroes(windows.OPENFILENAMEW);
     dialog.lStructSize = @sizeOf(windows.OPENFILENAMEW);
-    dialog.hwndOwner = @ptrCast(@alignCast(window_handle));
     dialog.lpstrFilter = filter;
     dialog.lpstrFile = &path_buffer;
     dialog.nMaxFile = path_buffer.len;

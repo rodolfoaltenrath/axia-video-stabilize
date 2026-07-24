@@ -43,7 +43,7 @@ pub fn main() !void {
 }
 
 fn importVideo(allocator: std.mem.Allocator, state: *app_state.AppState) void {
-    const selected_path = file_dialog.selectVideo(allocator, rl.getWindowHandle()) catch |err| {
+    const selected_path = file_dialog.selectVideo(allocator) catch |err| {
         state.setMessage(switch (err) {
             error.UnsupportedPlatform => "A importação por seletor ainda não está disponível neste sistema.",
             error.DialogFailed => "O Windows não conseguiu abrir o seletor de vídeos.",
