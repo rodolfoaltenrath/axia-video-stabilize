@@ -34,10 +34,10 @@ After starting the application, select **Importar vídeo** and choose a supporte
 file. Axia will analyze the clip frame by frame, report live frame progress and
 export `<input-name>-stabilized.mp4` beside the original.
 
-The workspace includes a real video preview with play/pause, space-bar control
-and timeline seeking. FFmpeg streams at most 960x540 and 60 fps with one RGBA
-frame ahead into a reusable Raylib texture, keeping memory bounded regardless
-of the source duration.
+The workspace includes a real video preview with compact play/pause, ±5-second
+skip controls, space-bar control and a seek bar below the image. FFmpeg streams
+at most 960x540 and 60 fps with one RGBA frame ahead into a reusable Raylib
+texture, keeping memory bounded regardless of the source duration.
 
 Enable native video libraries when installed in standard system locations:
 
