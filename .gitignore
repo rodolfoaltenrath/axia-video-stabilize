@@ -1,0 +1,55 @@
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# Internal planning and implementation notes
+/docs/
+
+# Editor and IDE state
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs, temporary files and test output
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+/tmp/
+/temp/
+/test-output/
+/coverage/
+
+# Video-analysis and generated export files
+*.trf
+*.partial.mp4
+*.axia-partial.mp4
+*-stabilized.*
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/

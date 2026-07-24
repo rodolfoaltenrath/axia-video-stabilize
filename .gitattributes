@@ -1,0 +1,7 @@
+* text=auto
+
+*.zig text eol=lf
+*.zon text eol=lf
+*.md text eol=lf
+*.ps1 text eol=crlf
+*.ttf binary
