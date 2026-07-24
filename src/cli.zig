@@ -2,11 +2,13 @@ const std = @import("std");
 const app_state = @import("app_state.zig");
 const ffmpeg_cli = @import("core/ffmpeg_cli.zig");
 const media = @import("core/media.zig");
+const engine = @import("engine/engine.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    try engine.ensureSelectedBackendIsReady();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);

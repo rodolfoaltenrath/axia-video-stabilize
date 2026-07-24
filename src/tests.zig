@@ -1,10 +1,14 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const app_state = @import("app_state.zig");
 const ffmpeg_cli = @import("core/ffmpeg_cli.zig");
 const media = @import("core/media.zig");
 const stabilizer = @import("core/stabilizer.zig");
 const tracker = @import("core/tracker.zig");
 const trajectory = @import("core/trajectory.zig");
+const engine = @import("engine/engine.zig");
+const decoder = engine.decoder;
+const engine_types = engine.types;
 
 test "accumulates camera motion" {
     const motions = [_]tracker.Motion{
@@ -231,4 +235,193 @@ test "frame corrections include inverse scale delta" {
     try std.testing.expectEqual(@as(f64, 2), corrections[0].y);
     try std.testing.expectApproxEqAbs(@as(f64, -0.2), corrections[0].angle, 0.000001);
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), corrections[0].scale, 0.000001);
+}
+
+test "analysis sequence preserves frame count and presentation order" {
+    const time_base = engine_types.Rational{ .numerator = 1, .denominator = 60 };
+    var validator = engine_types.SequenceValidator{};
+
+    try validator.push(engine_types.AnalysisRecord.reference(.{
+        .index = 0,
+        .pts = 0,
+        .duration = 1,
+        .time_base = time_base,
+    }, 0));
+    try validator.push(.{
+        .timing = .{
+            .index = 1,
+            .pts = 1,
+            .duration = 1,
+            .time_base = time_base,
+        },
+        .global_motion_from_previous = .{ .x = 2, .y = -1, .angle = 0.01 },
+        .confidence = 0.9,
+        .tracked_points = 100,
+        .inlier_points = 84,
+        .residual_px = 0.7,
+    });
+    try validator.finish(2);
+}
+
+test "analysis sequence rejects a skipped frame" {
+    const time_base = engine_types.Rational{ .numerator = 1, .denominator = 30 };
+    var validator = engine_types.SequenceValidator{};
+    try validator.push(engine_types.AnalysisRecord.reference(.{
+        .index = 0,
+        .pts = 0,
+        .time_base = time_base,
+    }, 0));
+
+    try std.testing.expectError(error.UnexpectedFrameIndex, validator.push(.{
+        .timing = .{
+            .index = 2,
+            .pts = 2,
+            .time_base = time_base,
+        },
+        .confidence = 0.8,
+    }));
+}
+
+test "analysis sequence rejects non-monotonic PTS" {
+    const time_base = engine_types.Rational{ .numerator = 1, .denominator = 1000 };
+    var validator = engine_types.SequenceValidator{};
+    try validator.push(engine_types.AnalysisRecord.reference(.{
+        .index = 0,
+        .pts = 100,
+        .time_base = time_base,
+    }, 0));
+
+    try std.testing.expectError(error.NonMonotonicPts, validator.push(.{
+        .timing = .{
+            .index = 1,
+            .pts = 100,
+            .time_base = time_base,
+        },
+        .confidence = 0.8,
+    }));
+}
+
+test "scene cut starts with identity motion and a new scene" {
+    const time_base = engine_types.Rational{ .numerator = 1, .denominator = 24 };
+    var validator = engine_types.SequenceValidator{};
+    try validator.push(engine_types.AnalysisRecord.reference(.{
+        .index = 0,
+        .pts = 0,
+        .time_base = time_base,
+    }, 0));
+    try validator.push(.{
+        .timing = .{
+            .index = 1,
+            .pts = 1,
+            .time_base = time_base,
+        },
+        .confidence = 1,
+        .scene_id = 1,
+        .flags = .{ .scene_cut = true },
+    });
+    try validator.finish(2);
+}
+
+test "analysis record rejects invalid transform and point counts" {
+    const timing = engine_types.FrameTiming{
+        .index = 0,
+        .pts = 0,
+        .time_base = .{ .numerator = 1, .denominator = 30 },
+    };
+    try std.testing.expectError(error.InvalidTransform, (engine_types.AnalysisRecord{
+        .timing = timing,
+        .global_motion_from_previous = .{ .scale = 0 },
+    }).validate());
+    try std.testing.expectError(error.InvalidPointCount, (engine_types.AnalysisRecord{
+        .timing = timing,
+        .tracked_points = 4,
+        .inlier_points = 5,
+    }).validate());
+}
+
+test "selected engine never falls back silently" {
+    switch (engine.selected_backend) {
+        .legacy => try engine.ensureSelectedBackendIsReady(),
+        .native => if (engine.native_dependencies_enabled)
+            try std.testing.expectError(
+                error.NativeEngineNotImplemented,
+                engine.ensureSelectedBackendIsReady(),
+            )
+        else
+            try std.testing.expectError(
+                error.NativeDependenciesDisabled,
+                engine.ensureSelectedBackendIsReady(),
+            ),
+    }
+}
+
+test "analysis dimensions preserve aspect ratio without upscaling" {
+    const landscape = try decoder.fitAnalysisDimensions(1920, 1080, 960);
+    try std.testing.expectEqual(@as(u32, 960), landscape.width);
+    try std.testing.expectEqual(@as(u32, 540), landscape.height);
+
+    const portrait = try decoder.fitAnalysisDimensions(1080, 1920, 960);
+    try std.testing.expectEqual(@as(u32, 540), portrait.width);
+    try std.testing.expectEqual(@as(u32, 960), portrait.height);
+
+    const small = try decoder.fitAnalysisDimensions(640, 360, 960);
+    try std.testing.expectEqual(@as(u32, 640), small.width);
+    try std.testing.expectEqual(@as(u32, 360), small.height);
+}
+
+test "native decoder reports a missing input without leaking ownership" {
+    if (!decoder.native_enabled) return error.SkipZigTest;
+    try std.testing.expectError(error.OpenInputFailed, decoder.Decoder.open(
+        std.testing.allocator,
+        "axia-test-input-that-does-not-exist.mp4",
+        .{},
+    ));
+}
+
+test "native decoder visits every frame in an integration fixture" {
+    if (!decoder.native_enabled) return error.SkipZigTest;
+    if (build_options.test_video.len == 0 or build_options.test_video_frames == 0) {
+        return error.SkipZigTest;
+    }
+
+    var video_decoder = try decoder.Decoder.open(
+        std.testing.allocator,
+        build_options.test_video,
+        .{ .max_analysis_dimension = 160 },
+    );
+    defer video_decoder.deinit();
+
+    var validator = engine_types.SequenceValidator{};
+    var previous_pts: ?i64 = null;
+    var first_delta: ?i64 = null;
+    var has_variable_delta = false;
+    while (try video_decoder.readFrame()) |frame| {
+        if (previous_pts) |pts| {
+            const delta = frame.timing.pts - pts;
+            if (first_delta) |initial_delta| {
+                has_variable_delta = has_variable_delta or delta != initial_delta;
+            } else {
+                first_delta = delta;
+            }
+        }
+        previous_pts = frame.timing.pts;
+
+        const record = if (frame.timing.index == 0)
+            engine_types.AnalysisRecord.reference(frame.timing, 0)
+        else
+            engine_types.AnalysisRecord{
+                .timing = frame.timing,
+                .confidence = 0,
+                .flags = .{ .low_confidence = true, .fallback = true },
+            };
+        try validator.push(record);
+        try std.testing.expectEqual(
+            frame.stride * @as(usize, frame.height),
+            frame.pixels.len,
+        );
+    }
+    try validator.finish(build_options.test_video_frames);
+    if (build_options.test_video_require_vfr) {
+        try std.testing.expect(has_variable_delta);
+    }
 }

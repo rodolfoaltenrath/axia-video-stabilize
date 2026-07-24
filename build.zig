@@ -1,16 +1,36 @@
 const std = @import("std");
 const raylib_zig = @import("raylib_zig");
 
+const EngineBackend = enum {
+    legacy,
+    native,
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const engine_backend = b.option(
+        EngineBackend,
+        "engine",
+        "Stabilization engine to use: legacy or native",
+    ) orelse .legacy;
 
     // FFmpeg/OpenCV are optional while the UI and pipeline skeleton are being
     // developed. Enable them with -Dnative-video=true once their development
     // libraries are installed on the host or in the supplied search paths.
     const native_video = b.option(bool, "native-video", "Link FFmpeg and OpenCV C APIs") orelse false;
+    const native_ffmpeg = b.option(bool, "native-ffmpeg", "Link the FFmpeg C API") orelse native_video;
+    const native_opencv = b.option(bool, "native-opencv", "Link the OpenCV bridge") orelse native_video;
     const native_include = b.option([]const u8, "native-include", "Directory containing FFmpeg/OpenCV headers");
     const native_lib = b.option([]const u8, "native-lib", "Directory containing FFmpeg/OpenCV libraries");
+    const ffmpeg_include_option = b.option([]const u8, "ffmpeg-include", "Directory containing FFmpeg headers");
+    const ffmpeg_lib_option = b.option([]const u8, "ffmpeg-lib", "Directory containing FFmpeg libraries");
+    const ffmpeg_include = if (ffmpeg_include_option) |path| path else native_include;
+    const ffmpeg_lib = if (ffmpeg_lib_option) |path| path else native_lib;
+    const test_video = b.option([]const u8, "test-video", "Video fixture for native decoder tests") orelse "";
+    const test_video_frames = b.option(u64, "test-video-frames", "Expected decoded fixture frame count") orelse 0;
+    const test_video_require_vfr = b.option(bool, "test-video-require-vfr", "Require varying fixture PTS deltas") orelse false;
 
     const raylib_dep = b.dependency("raylib_zig", .{
         .target = target,
@@ -28,25 +48,26 @@ pub fn build(b: *std.Build) void {
     });
 
     const build_options = b.addOptions();
+    build_options.addOption(EngineBackend, "engine_backend", engine_backend);
     build_options.addOption(bool, "native_video", native_video);
+    build_options.addOption(bool, "native_ffmpeg", native_ffmpeg);
+    build_options.addOption(bool, "native_opencv", native_opencv);
+    build_options.addOption([]const u8, "test_video", test_video);
+    build_options.addOption(u64, "test_video_frames", test_video_frames);
+    build_options.addOption(bool, "test_video_require_vfr", test_video_require_vfr);
     exe.root_module.addOptions("build_options", build_options);
     exe.root_module.addImport("raylib", raylib_dep.module("raylib"));
     exe.linkLibrary(raylib_dep.artifact("raylib"));
     exe.linkLibC();
-
-    if (native_video) {
-        if (native_include) |path| exe.addIncludePath(.{ .cwd_relative = path });
-        if (native_lib) |path| exe.addLibraryPath(.{ .cwd_relative = path });
-
-        exe.linkSystemLibrary("avcodec");
-        exe.linkSystemLibrary("avformat");
-        exe.linkSystemLibrary("avutil");
-        exe.linkSystemLibrary("swscale");
-        exe.linkSystemLibrary("opencv_core");
-        exe.linkSystemLibrary("opencv_imgproc");
-        exe.linkSystemLibrary("opencv_video");
-        exe.linkSystemLibrary("opencv_calib3d");
-    }
+    linkNativeDependencies(
+        exe,
+        native_ffmpeg,
+        native_opencv,
+        ffmpeg_include,
+        ffmpeg_lib,
+        native_include,
+        native_lib,
+    );
 
     // raylib links the platform windowing dependencies. These explicit OpenGL
     // links document and enforce the desktop renderer requested by the app.
@@ -72,6 +93,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     cli.root_module.addOptions("build_options", build_options);
+    cli.linkLibC();
+    linkNativeDependencies(
+        cli,
+        native_ffmpeg,
+        native_opencv,
+        ffmpeg_include,
+        ffmpeg_lib,
+        native_include,
+        native_lib,
+    );
     b.installArtifact(cli);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -91,7 +122,45 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     unit_tests.root_module.addOptions("build_options", build_options);
+    unit_tests.linkLibC();
+    linkNativeDependencies(
+        unit_tests,
+        native_ffmpeg,
+        native_opencv,
+        ffmpeg_include,
+        ffmpeg_lib,
+        native_include,
+        native_lib,
+    );
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+}
+
+fn linkNativeDependencies(
+    artifact: *std.Build.Step.Compile,
+    native_ffmpeg: bool,
+    native_opencv: bool,
+    ffmpeg_include: ?[]const u8,
+    ffmpeg_lib: ?[]const u8,
+    native_include: ?[]const u8,
+    native_lib: ?[]const u8,
+) void {
+    if (native_ffmpeg) {
+        if (ffmpeg_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
+        if (ffmpeg_lib) |path| artifact.addLibraryPath(.{ .cwd_relative = path });
+        artifact.linkSystemLibrary("avcodec");
+        artifact.linkSystemLibrary("avformat");
+        artifact.linkSystemLibrary("avutil");
+        artifact.linkSystemLibrary("swscale");
+    }
+
+    if (native_opencv) {
+        if (native_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
+        if (native_lib) |path| artifact.addLibraryPath(.{ .cwd_relative = path });
+        artifact.linkSystemLibrary("opencv_core");
+        artifact.linkSystemLibrary("opencv_imgproc");
+        artifact.linkSystemLibrary("opencv_video");
+        artifact.linkSystemLibrary("opencv_calib3d");
+    }
 }

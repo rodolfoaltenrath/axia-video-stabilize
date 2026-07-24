@@ -1,6 +1,7 @@
 const std = @import("std");
 const state_mod = @import("../app_state.zig");
 const ffmpeg_cli = @import("../core/ffmpeg_cli.zig");
+const engine = @import("../engine/engine.zig");
 
 const Job = union(enum) {
     stabilize: state_mod.JobConfig,
@@ -80,6 +81,7 @@ pub const ThreadPool = struct {
     }
 
     fn runPipelineFallible(self: *ThreadPool, config: state_mod.JobConfig) !void {
+        try engine.ensureSelectedBackendIsReady();
         if (config.parameters.mode == .distortion) return error.DistortionModeNotImplemented;
 
         self.state.update(.loading, 0.02);
@@ -168,6 +170,8 @@ fn messageForError(err: anyerror) []const u8 {
         error.AnalyzeFailed => "A análise de movimento falhou. Consulte o log para detalhes.",
         error.RenderFailed => "A renderização falhou. Consulte o log para detalhes.",
         error.DistortionModeNotImplemented => "O modo de distorção ainda não está disponível.",
+        error.NativeDependenciesDisabled => "O engine nativo exige um build com -Dnative-video=true.",
+        error.NativeEngineNotImplemented => "O engine nativo ainda está em construção. Use -Dengine=legacy.",
         else => "Falha inesperada no pipeline de estabilização.",
     };
 }
