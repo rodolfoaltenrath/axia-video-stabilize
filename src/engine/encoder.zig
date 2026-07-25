@@ -57,12 +57,14 @@ const DisabledEncoder = struct {
         output_path: []const u8,
         source_dimensions: decoder.Dimensions,
         time_base: types.Rational,
+        frame_rate: ?types.Rational,
         options: Options,
     ) EncoderError!DisabledEncoder {
         _ = allocator;
         _ = output_path;
         _ = source_dimensions;
         _ = time_base;
+        _ = frame_rate;
         _ = options;
         return error.BackendNotEnabled;
     }
@@ -104,6 +106,7 @@ const NativeEncoder = struct {
         output_path: []const u8,
         source_dimensions: decoder.Dimensions,
         time_base: types.Rational,
+        frame_rate: ?types.Rational,
         options: Options,
     ) EncoderError!NativeEncoder {
         if (output_path.len == 0) return error.EmptyPath;
@@ -158,6 +161,16 @@ const NativeEncoder = struct {
             .num = time_base.numerator,
             .den = time_base.denominator,
         };
+        
+        if (frame_rate) |fr| {
+            codec_context.framerate = .{
+                .num = fr.numerator,
+                .den = fr.denominator,
+            };
+        } else {
+            codec_context.framerate = .{ .num = 30, .den = 1 };
+        }
+
         codec_context.gop_size = @intCast(options.gop_size);
         codec_context.max_b_frames = @intCast(options.max_b_frames);
         if ((output_context.oformat.*.flags &
@@ -335,18 +348,15 @@ const NativeEncoder = struct {
         if (ffmpeg.av_frame_make_writable(self.frame) < 0) {
             return error.FrameAllocationFailed;
         }
+        
+        // Proteção contra leitura fora do índice 3 no array C
         var source_data = [_][*c]const u8{
-            input.pixels.ptr,
-            null,
-            null,
-            null,
+            input.pixels.ptr, null, null, null, null, null, null, null,
         };
         var source_stride = [_]c_int{
-            @intCast(input.stride),
-            0,
-            0,
-            0,
+            @intCast(input.stride), 0, 0, 0, 0, 0, 0, 0,
         };
+        
         const converted = ffmpeg.sws_scale(
             self.sws_context,
             &source_data,
@@ -413,8 +423,11 @@ const NativeEncoder = struct {
                 self.output_context,
                 self.packet,
             );
+            
+            // Unref explícito obrigatório após o envio para não vazar memória no write loop
+            ffmpeg.av_packet_unref(self.packet);
+            
             if (write_result < 0) {
-                ffmpeg.av_packet_unref(self.packet);
                 return error.PacketWriteFailed;
             }
         }

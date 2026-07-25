@@ -431,8 +431,11 @@ fn writePacket(
     packet.stream_index = output_stream_index;
     packet.pos = -1;
     const result = ffmpeg.av_interleaved_write_frame(output, packet);
+    
+    // Libera a referência que criamos no av_read_frame em ambos os casos
+    ffmpeg.av_packet_unref(packet);
+    
     if (result < 0) {
-        ffmpeg.av_packet_unref(packet);
         return error.PacketWriteFailed;
     }
 }
