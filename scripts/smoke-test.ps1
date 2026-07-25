@@ -27,8 +27,6 @@ if ($LASTEXITCODE -ne 0) {
     throw "synthetic video generation failed with exit code $LASTEXITCODE"
 }
 
-$env:AXIA_FFMPEG = (Get-Command $Ffmpeg).Source
-$env:AXIA_FFPROBE = (Get-Command $Ffprobe).Source
 & (Join-Path $repoRoot "zig-out\bin\axia-cli.exe") $inputPath $outputPath
 if ($LASTEXITCODE -ne 0) {
     throw "axia-cli failed with exit code $LASTEXITCODE"

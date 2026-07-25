@@ -4,11 +4,8 @@ Desktop video-stabilization workspace for Windows and Linux, written in Zig.
 The project is evolving from a responsive UI prototype into a real automatic
 stabilization pipeline.
 
-The default product backend still uses FFmpeg and libvidstab. It is isolated in
-`src/legacy` so it can be removed after native export has been exercised on the
-project's supported media matrix.
-
-The native engine lives in `src/engine`. It currently provides frame-exact
+The project has a single stabilization engine, implemented in `src/engine`.
+It provides frame-exact
 FFmpeg decoding, presentation timestamps for CFR/VFR media, spatially
 distributed Shi-Tomasi features, forward/backward pyramidal Lucas-Kanade
 tracking, RANSAC similarity transforms, scene segmentation and
@@ -20,10 +17,11 @@ and metadata into a transactionally published MP4.
 ## Requirements
 
 - Zig 0.13.0
-- FFmpeg and ffprobe on `PATH`, including the `vidstabdetect` and
-  `vidstabtransform` filters
+- FFmpeg development libraries, including avcodec, avformat, avutil and swscale
+- OpenCV development libraries used by the small bridge in `native/`
+- The `ffmpeg` executable on `PATH` for the graphical video preview and test
+  fixture generation
 - Windows 10/11 or Linux with the usual X11/OpenGL development packages
-- FFmpeg/OpenCV development libraries only when using `-Dnative-video=true`
 
 Raylib 5.5 is downloaded and compiled by Zig. It creates the OpenGL 3.3 window
 and keeps the repository independent from a global GUI installation.
@@ -47,16 +45,17 @@ skip controls, space-bar control and a seek bar below the image. FFmpeg streams
 at most 960x540 and 60 fps with one RGBA frame ahead into a reusable Raylib
 texture, keeping memory bounded regardless of the source duration.
 
-Enable native analysis libraries when installed in standard system locations:
+FFmpeg and OpenCV are enabled by default when installed in standard system
+locations:
 
 ```text
-zig build run -Dengine=native -Dnative-video=true
+zig build run
 ```
 
 On Windows, custom library locations can be supplied explicitly:
 
 ```text
-zig build run -Dengine=native -Dnative-video=true \
+zig build run \
   -Dnative-include=C:/deps/include \
   -Dnative-lib=C:/deps/lib
 ```
@@ -67,7 +66,7 @@ The same pipeline is also available without the graphical window:
 zig build cli -- input.mp4 output.mp4
 ```
 
-Backend selection never falls back silently. Native export currently stream
+There is no legacy backend or backend selection flag. Export currently stream
 copies source audio tracks into MP4; inputs whose audio codec is not accepted by
 the MP4 muxer fail explicitly instead of losing audio.
 
@@ -77,7 +76,7 @@ Run the reproducible end-to-end smoke test on Windows:
 powershell -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 ```
 
-Native integration tests are split by dependency and can be run with:
+Integration tests are split by dependency and can be run with:
 
 ```text
 powershell -ExecutionPolicy Bypass -File scripts/test-native-decoder.ps1

@@ -15,15 +15,6 @@ pub const encoder = @import("encoder.zig");
 pub const muxer = @import("muxer.zig");
 pub const exporter = @import("exporter.zig");
 
-pub const Backend = enum {
-    legacy,
-    native,
-};
-
-pub const selected_backend: Backend = switch (build_options.engine_backend) {
-    .legacy => .legacy,
-    .native => .native,
-};
 pub const native_dependencies_enabled =
     build_options.native_ffmpeg and build_options.native_opencv;
 
@@ -31,13 +22,19 @@ pub const AvailabilityError = error{
     NativeDependenciesDisabled,
 };
 
-/// Backend selection is explicit and never falls back silently. The native
-/// exporter requires both FFmpeg and OpenCV development dependencies.
-pub fn ensureSelectedBackendIsReady() AvailabilityError!void {
-    if (selected_backend == .legacy) return;
+/// The product has a single engine. Focused dependency switches remain
+/// available only so FFmpeg and OpenCV adapters can be tested independently.
+pub fn ensureReady() AvailabilityError!void {
     if (!native_dependencies_enabled) return error.NativeDependenciesDisabled;
 }
 
-test "engine module has a valid compile-time backend" {
-    try std.testing.expect(selected_backend == .legacy or selected_backend == .native);
+test "complete engine requires both native dependencies" {
+    if (native_dependencies_enabled) {
+        try ensureReady();
+    } else {
+        try std.testing.expectError(
+            error.NativeDependenciesDisabled,
+            ensureReady(),
+        );
+    }
 }

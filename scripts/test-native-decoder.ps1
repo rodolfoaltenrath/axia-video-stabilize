@@ -37,6 +37,7 @@ function Invoke-ZigDecoderTest {
     $arguments = @(
         "build",
         "test",
+        "-Dnative-video=false",
         "-Dnative-ffmpeg=true",
         "-Dffmpeg-include=$includePath",
         "-Dffmpeg-lib=$libraryPath",

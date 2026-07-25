@@ -1,7 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const app_state = @import("app_state.zig");
-const ffmpeg_cli = @import("legacy/ffmpeg_cli.zig");
 const media = @import("core/media.zig");
 const engine = @import("engine/engine.zig");
 const analyzer = engine.analyzer;
@@ -44,68 +43,6 @@ test "preview size is bounded without upscaling" {
     const small = media.fitPreviewSize(640, 360, 960, 540);
     try std.testing.expectEqual(@as(u32, 640), small.width);
     try std.testing.expectEqual(@as(u32, 360), small.height);
-}
-
-test "parses ffprobe metadata" {
-    const output =
-        \\width=1920
-        \\height=1080
-        \\avg_frame_rate=30000/1001
-        \\nb_frames=240
-        \\duration=8.008000
-    ;
-    const info = try ffmpeg_cli.parseProbeOutput(output);
-    try std.testing.expectEqual(@as(u32, 1920), info.width);
-    try std.testing.expectEqual(@as(u32, 1080), info.height);
-    try std.testing.expectEqual(@as(u64, 240), info.frame_count.?);
-    try std.testing.expectApproxEqAbs(@as(f64, 29.97002997), info.framesPerSecond(), 0.000001);
-}
-
-test "rejects invalid ffprobe frame rate" {
-    const output =
-        \\width=1920
-        \\height=1080
-        \\avg_frame_rate=30/0
-        \\duration=8.0
-    ;
-    try std.testing.expectError(error.InvalidFrameRate, ffmpeg_cli.parseProbeOutput(output));
-}
-
-test "rejects zero ffprobe frame rate numerator" {
-    const output =
-        \\width=1920
-        \\height=1080
-        \\avg_frame_rate=0/1
-        \\duration=8.0
-    ;
-    try std.testing.expectError(error.InvalidFrameRate, ffmpeg_cli.parseProbeOutput(output));
-}
-
-test "estimates frame count when container omits it" {
-    const info = ffmpeg_cli.ProbeInfo{
-        .width = 1280,
-        .height = 720,
-        .frame_rate_numerator = 30000,
-        .frame_rate_denominator = 1001,
-        .duration_seconds = 10.01,
-    };
-    try std.testing.expectEqual(@as(u64, 300), info.estimatedFrameCount());
-}
-
-test "parses ffmpeg frame progress blocks" {
-    var parser = ffmpeg_cli.ProgressParser{};
-    try std.testing.expect(parser.push("frame=23\r\n") == null);
-    try std.testing.expect(parser.push("out_time_us=766667\r\n") == null);
-    try std.testing.expect(parser.push("speed=5.47x\r\n") == null);
-    const progress = parser.push("progress=continue\r\n").?;
-
-    try std.testing.expectEqual(@as(u64, 23), progress.frame);
-    try std.testing.expectEqual(@as(u64, 766667), progress.out_time_us);
-    try std.testing.expectApproxEqAbs(@as(f64, 5.47), progress.speed, 0.000001);
-    try std.testing.expect(!progress.finished);
-
-    const finished = parser.push("progress=end\r\n").?;
-    try std.testing.expect(finished.finished);
 }
 
 test "processing job freezes media and parameters" {
@@ -518,19 +455,6 @@ test "analysis record rejects invalid transform and point counts" {
     }).validate());
 }
 
-test "selected engine never falls back silently" {
-    switch (engine.selected_backend) {
-        .legacy => try engine.ensureSelectedBackendIsReady(),
-        .native => if (engine.native_dependencies_enabled)
-            try engine.ensureSelectedBackendIsReady()
-        else
-            try std.testing.expectError(
-                error.NativeDependenciesDisabled,
-                engine.ensureSelectedBackendIsReady(),
-            ),
-    }
-}
-
 test "analysis dimensions preserve aspect ratio without upscaling" {
     const landscape = try decoder.fitAnalysisDimensions(1920, 1080, 960);
     try std.testing.expectEqual(@as(u32, 960), landscape.width);
@@ -764,6 +688,9 @@ test "native decoder visits every frame in an integration fixture" {
         .{ .max_analysis_dimension = 160 },
     );
     defer video_decoder.deinit();
+    try std.testing.expect(video_decoder.info.framesPerSecond() != null);
+    try std.testing.expect(video_decoder.info.duration_seconds != null);
+    try std.testing.expect(video_decoder.info.duration_seconds.? > 0);
 
     var validator = engine_types.SequenceValidator{};
     var previous_pts: ?i64 = null;

@@ -54,7 +54,15 @@ pub const VideoInfo = struct {
     source: Dimensions,
     analysis: Dimensions,
     time_base: types.Rational,
+    frame_rate: ?types.Rational,
+    duration_seconds: ?f64,
     estimated_frame_count: ?u64,
+
+    pub fn framesPerSecond(self: VideoInfo) ?f64 {
+        const rate = self.frame_rate orelse return null;
+        return @as(f64, @floatFromInt(rate.numerator)) /
+            @as(f64, @floatFromInt(rate.denominator));
+    }
 };
 
 /// Borrowed frame view. Pixel memory remains owned by `Decoder` and is valid
@@ -108,6 +116,8 @@ pub fn fitAnalysisDimensions(
 pub const Decoder = if (build_options.native_ffmpeg) NativeDecoder else DisabledDecoder;
 
 const DisabledDecoder = struct {
+    info: VideoInfo = undefined,
+
     pub fn open(
         allocator: std.mem.Allocator,
         path: []const u8,
@@ -260,6 +270,31 @@ const NativeDecoder = struct {
             @intCast(stream.*.nb_frames)
         else
             null;
+        const guessed_rate = ffmpeg.av_guess_frame_rate(
+            format_context,
+            stream,
+            null,
+        );
+        const frame_rate: ?types.Rational =
+            if (guessed_rate.num > 0 and guessed_rate.den > 0)
+            .{
+                .numerator = guessed_rate.num,
+                .denominator = guessed_rate.den,
+            }
+        else
+            null;
+        const duration_seconds: ?f64 =
+            if (stream.*.duration != ffmpeg.AV_NOPTS_VALUE and
+            stream.*.duration > 0)
+            @as(f64, @floatFromInt(stream.*.duration)) *
+                @as(f64, @floatFromInt(stream.*.time_base.num)) /
+                @as(f64, @floatFromInt(stream.*.time_base.den))
+        else if (format_context.duration != ffmpeg.AV_NOPTS_VALUE and
+            format_context.duration > 0)
+            @as(f64, @floatFromInt(format_context.duration)) /
+                @as(f64, ffmpeg.AV_TIME_BASE)
+        else
+            null;
 
         return .{
             .allocator = allocator,
@@ -272,6 +307,8 @@ const NativeDecoder = struct {
                 .source = source,
                 .analysis = analysis,
                 .time_base = time_base,
+                .frame_rate = frame_rate,
+                .duration_seconds = duration_seconds,
                 .estimated_frame_count = estimated_frame_count,
             },
             .output_dimensions = output_dimensions,

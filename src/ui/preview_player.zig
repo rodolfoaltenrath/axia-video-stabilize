@@ -1,7 +1,7 @@
 const std = @import("std");
 const rl = @import("raylib");
-const ffmpeg_cli = @import("../legacy/ffmpeg_cli.zig");
 const media = @import("../core/media.zig");
+const decoder_mod = @import("../engine/decoder.zig");
 
 const max_preview_width: u32 = 960;
 const max_preview_height: u32 = 540;
@@ -64,10 +64,16 @@ pub const Player = struct {
         self.releaseMedia();
         errdefer self.releaseMedia();
 
-        const info = try ffmpeg_cli.probe(self.allocator, input_path);
+        var metadata_decoder = try decoder_mod.Decoder.open(
+            self.allocator,
+            input_path,
+            .{ .max_analysis_dimension = 2 },
+        );
+        defer metadata_decoder.deinit();
+        const info = metadata_decoder.info;
         const size = media.fitPreviewSize(
-            info.width,
-            info.height,
+            info.source.width,
+            info.source.height,
             max_preview_width,
             max_preview_height,
         );
@@ -90,8 +96,20 @@ pub const Player = struct {
 
         self.width = size.width;
         self.height = size.height;
-        self.fps = @min(max_preview_fps, info.framesPerSecond());
-        self.duration_seconds = info.duration_seconds;
+        const fps = info.framesPerSecond() orelse
+            if (info.estimated_frame_count != null and
+            info.duration_seconds != null and
+            info.duration_seconds.? > 0)
+            @as(f64, @floatFromInt(info.estimated_frame_count.?)) /
+                info.duration_seconds.?
+        else
+            30;
+        self.fps = @min(max_preview_fps, fps);
+        self.duration_seconds = info.duration_seconds orelse
+            if (info.estimated_frame_count) |count|
+            @as(f64, @floatFromInt(count)) / fps
+        else
+            return error.MissingMediaDuration;
         self.position_seconds = 0;
         self.playing = true;
         try self.startDecoder(0);

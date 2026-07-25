@@ -19,6 +19,7 @@ $env:PATH = $binaryPath + [IO.Path]::PathSeparator + $originalPath
 
 try {
     & zig build test `
+        -Dnative-video=false `
         -Dnative-opencv=true `
         "-Dopencv-include=$includePath" `
         "-Dopencv-lib=$libraryPath" `

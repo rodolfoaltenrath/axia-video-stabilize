@@ -1,24 +1,13 @@
 const std = @import("std");
 const raylib_zig = @import("raylib_zig");
 
-const EngineBackend = enum {
-    legacy,
-    native,
-};
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const engine_backend = b.option(
-        EngineBackend,
-        "engine",
-        "Stabilization engine to use: legacy or native",
-    ) orelse .legacy;
-
-    // FFmpeg/OpenCV remain optional for legacy builds. `native-video` is the
-    // convenience switch required by the complete native export pipeline.
-    const native_video = b.option(bool, "native-video", "Link FFmpeg and OpenCV C APIs") orelse false;
+    // The native engine is the product engine and its dependencies are enabled
+    // by default. Granular switches exist for focused adapter tests.
+    const native_video = b.option(bool, "native-video", "Link FFmpeg and OpenCV C APIs") orelse true;
     const native_ffmpeg = b.option(bool, "native-ffmpeg", "Link the FFmpeg C API") orelse native_video;
     const native_opencv = b.option(bool, "native-opencv", "Link the OpenCV bridge") orelse native_video;
     const native_include = b.option([]const u8, "native-include", "Directory containing FFmpeg/OpenCV headers");
@@ -52,7 +41,6 @@ pub fn build(b: *std.Build) void {
     });
 
     const build_options = b.addOptions();
-    build_options.addOption(EngineBackend, "engine_backend", engine_backend);
     build_options.addOption(bool, "native_ffmpeg", native_ffmpeg);
     build_options.addOption(bool, "native_opencv", native_opencv);
     build_options.addOption([]const u8, "test_video", test_video);

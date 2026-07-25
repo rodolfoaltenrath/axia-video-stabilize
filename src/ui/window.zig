@@ -165,7 +165,7 @@ fn drawParameters(panel: rl.Rectangle, snapshot: state_mod.Snapshot) UiResult {
     rl.drawRectangleRounded(note, 0.12, 8, theme.surface_alt);
     components.textStrong("PIPELINE REAL EM 2 PASSOS", note.x + 12, note.y + 11, 11, theme.accent);
     if (snapshot.media.hasInput()) {
-        components.text("Movimento global via libvidstab.", note.x + 12, note.y + 31, 12, theme.text_muted);
+        components.text("Movimento estimado pela engine Zig.", note.x + 12, note.y + 31, 12, theme.text_muted);
         components.text("Saída MP4 ao lado do original.", note.x + 12, note.y + 47, 12, theme.text_muted);
     } else {
         components.text("Clique em Importar vídeo.", note.x + 12, note.y + 31, 12, theme.text_muted);
