@@ -12,8 +12,10 @@ The native engine lives in `src/engine`. It currently provides frame-exact
 FFmpeg decoding, presentation timestamps for CFR/VFR media, spatially
 distributed Shi-Tomasi features, forward/backward pyramidal Lucas-Kanade
 tracking, RANSAC similarity transforms, scene segmentation and
-confidence-weighted, timestamp-aware trajectory smoothing. Native warping,
-adaptive crop, encoding and audio muxing are the remaining end-to-end stages.
+confidence-weighted, timestamp-aware trajectory smoothing. It also builds a
+per-scene static or dynamic crop plan, decodes full-resolution BGRA frames and
+warps them through reusable buffers. Native video encoding and audio muxing are
+the remaining end-to-end export stages.
 
 ## Requirements
 
@@ -65,8 +67,8 @@ The same pipeline is also available without the graphical window:
 zig build cli -- input.mp4 output.mp4
 ```
 
-`-Dengine=native` is intentionally rejected until native rendering and
-encoding are implemented; it never falls back silently to libvidstab.
+`-Dengine=native` is intentionally rejected until native encoding and audio
+muxing are implemented; it never falls back silently to libvidstab.
 
 Run the reproducible end-to-end smoke test on Windows:
 

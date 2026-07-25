@@ -227,7 +227,8 @@ const NativeAnalyzer = struct {
 };
 
 fn validateOptions(options: Options) AnalyzerError!void {
-    if (!std.math.isFinite(options.low_confidence_threshold) or
+    if (options.decoder.output_format != .gray8 or
+        !std.math.isFinite(options.low_confidence_threshold) or
         options.low_confidence_threshold < 0 or
         options.low_confidence_threshold > 1 or
         !std.math.isFinite(options.hard_scene_cut_histogram_distance) or

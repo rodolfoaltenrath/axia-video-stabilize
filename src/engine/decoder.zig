@@ -30,6 +30,19 @@ pub const DecoderError = error{
 
 pub const Options = struct {
     max_analysis_dimension: u32 = 960,
+    output_format: PixelFormat = .gray8,
+};
+
+pub const PixelFormat = enum {
+    gray8,
+    bgra8,
+
+    pub fn bytesPerPixel(self: PixelFormat) usize {
+        return switch (self) {
+            .gray8 => 1,
+            .bgra8 => 4,
+        };
+    }
 };
 
 pub const Dimensions = struct {
@@ -52,6 +65,7 @@ pub const FrameView = struct {
     width: u32,
     height: u32,
     stride: usize,
+    format: PixelFormat,
 };
 
 pub fn fitAnalysisDimensions(
@@ -124,6 +138,8 @@ const NativeDecoder = struct {
     sws_context: ?*ffmpeg.SwsContext = null,
     video_stream_index: c_int,
     info: VideoInfo,
+    output_dimensions: Dimensions,
+    output_format: PixelFormat,
     output_pixels: []u8,
     output_stride: usize,
     next_index: u64 = 0,
@@ -206,11 +222,19 @@ const NativeDecoder = struct {
             source.height,
             options.max_analysis_dimension,
         );
-        const output_stride: usize = analysis.width;
+        const output_dimensions = switch (options.output_format) {
+            .gray8 => analysis,
+            .bgra8 => source,
+        };
+        const output_stride = std.math.mul(
+            usize,
+            @as(usize, output_dimensions.width),
+            options.output_format.bytesPerPixel(),
+        ) catch return error.InvalidVideoDimensions;
         const output_size = std.math.mul(
             usize,
             output_stride,
-            @as(usize, analysis.height),
+            @as(usize, output_dimensions.height),
         ) catch return error.InvalidVideoDimensions;
         const output_pixels = try allocator.alloc(
             u8,
@@ -250,6 +274,8 @@ const NativeDecoder = struct {
                 .time_base = time_base,
                 .estimated_frame_count = estimated_frame_count,
             },
+            .output_dimensions = output_dimensions,
+            .output_format = options.output_format,
             .output_pixels = output_pixels,
             .output_stride = output_stride,
         };
@@ -329,14 +355,19 @@ const NativeDecoder = struct {
         }
 
         const source_format: ffmpeg.AVPixelFormat = self.frame.format;
+        const output_pixel_format: ffmpeg.AVPixelFormat =
+            switch (self.output_format) {
+            .gray8 => ffmpeg.AV_PIX_FMT_GRAY8,
+            .bgra8 => ffmpeg.AV_PIX_FMT_BGRA,
+        };
         const cached_context = ffmpeg.sws_getCachedContext(
             self.sws_context,
             self.frame.width,
             self.frame.height,
             source_format,
-            @intCast(self.info.analysis.width),
-            @intCast(self.info.analysis.height),
-            ffmpeg.AV_PIX_FMT_GRAY8,
+            @intCast(self.output_dimensions.width),
+            @intCast(self.output_dimensions.height),
+            output_pixel_format,
             ffmpeg.SWS_BILINEAR,
             null,
             null,
@@ -368,7 +399,7 @@ const NativeDecoder = struct {
             &destination_data,
             &destination_stride,
         );
-        if (converted_rows != self.info.analysis.height) {
+        if (converted_rows != self.output_dimensions.height) {
             return error.ConversionFailed;
         }
 
@@ -388,9 +419,10 @@ const NativeDecoder = struct {
         return .{
             .timing = timing,
             .pixels = self.output_pixels,
-            .width = self.info.analysis.width,
-            .height = self.info.analysis.height,
+            .width = self.output_dimensions.width,
+            .height = self.output_dimensions.height,
             .stride = self.output_stride,
+            .format = self.output_format,
         };
     }
 };

@@ -173,7 +173,7 @@ fn messageForError(err: anyerror) []const u8 {
         error.RenderFailed => "A renderização falhou. Consulte o log para detalhes.",
         error.DistortionModeNotImplemented => "O modo de distorção ainda não está disponível.",
         error.NativeDependenciesDisabled => "O engine nativo exige um build com -Dnative-video=true.",
-        error.NativeExportNotImplemented => "A análise nativa está pronta; warp e encode ainda exigem -Dengine=legacy.",
+        error.NativeExportNotImplemented => "Análise e warp nativos estão prontos; encode e áudio ainda exigem -Dengine=legacy.",
         else => "Falha inesperada no pipeline de estabilização.",
     };
 }

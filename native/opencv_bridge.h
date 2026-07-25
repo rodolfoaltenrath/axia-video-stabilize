@@ -42,6 +42,15 @@ typedef struct AxiaSimilarityTransform {
     double scale;
 } AxiaSimilarityTransform;
 
+typedef struct AxiaAffine2d {
+    double m00;
+    double m01;
+    double m02;
+    double m10;
+    double m11;
+    double m12;
+} AxiaAffine2d;
+
 enum {
     AXIA_CV_OK = 0,
     AXIA_CV_INVALID_ARGUMENT = 1,
@@ -85,6 +94,15 @@ int32_t axia_cv_estimate_similarity_ransac(
     uint8_t *inlier_mask,
     size_t inlier_capacity,
     size_t *inlier_count);
+
+int32_t axia_cv_warp_affine_bgra8(
+    const uint8_t *source_pixels,
+    size_t source_stride,
+    uint8_t *destination_pixels,
+    size_t destination_stride,
+    int32_t width,
+    int32_t height,
+    const AxiaAffine2d *matrix);
 
 const char *axia_cv_last_error(void);
 

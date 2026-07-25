@@ -289,6 +289,68 @@ extern "C" int32_t axia_cv_estimate_similarity_ransac(
     return AXIA_CV_EXCEPTION;
 }
 
+extern "C" int32_t axia_cv_warp_affine_bgra8(
+    const uint8_t *source_pixels,
+    size_t source_stride,
+    uint8_t *destination_pixels,
+    size_t destination_stride,
+    int32_t width,
+    int32_t height,
+    const AxiaAffine2d *matrix) {
+    clear_error();
+
+    const bool valid_width =
+        width > 0 &&
+        static_cast<size_t>(width) <= SIZE_MAX / static_cast<size_t>(4);
+    const size_t minimum_stride =
+        valid_width ? static_cast<size_t>(width) * 4 : 0;
+    if (source_pixels == nullptr || destination_pixels == nullptr ||
+        matrix == nullptr || !valid_width || height <= 0 ||
+        source_stride < minimum_stride ||
+        destination_stride < minimum_stride) {
+        set_error("invalid BGRA warp arguments");
+        return AXIA_CV_INVALID_ARGUMENT;
+    }
+
+    try {
+        cv::Mat source(
+            height,
+            width,
+            CV_8UC4,
+            const_cast<uint8_t *>(source_pixels),
+            source_stride);
+        cv::Mat destination(
+            height,
+            width,
+            CV_8UC4,
+            destination_pixels,
+            destination_stride);
+        const cv::Mat affine = (cv::Mat_<double>(2, 3) <<
+            matrix->m00,
+            matrix->m01,
+            matrix->m02,
+            matrix->m10,
+            matrix->m11,
+            matrix->m12);
+        cv::warpAffine(
+            source,
+            destination,
+            affine,
+            cv::Size(width, height),
+            cv::INTER_CUBIC,
+            cv::BORDER_REPLICATE);
+        return AXIA_CV_OK;
+    } catch (const cv::Exception &exception) {
+        set_error(exception.what());
+    } catch (const std::exception &exception) {
+        set_error(exception.what());
+    } catch (...) {
+        set_error("unknown OpenCV exception");
+    }
+
+    return AXIA_CV_EXCEPTION;
+}
+
 extern "C" const char *axia_cv_last_error(void) {
     return last_error;
 }

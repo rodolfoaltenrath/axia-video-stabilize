@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         "Stabilization engine to use: legacy or native",
     ) orelse .legacy;
 
-    // FFmpeg/OpenCV are optional while native rendering and encoding are being
+    // FFmpeg/OpenCV are optional while native encoding and audio muxing are
     // completed. `native-video` is the convenience switch for both APIs.
     const native_video = b.option(bool, "native-video", "Link FFmpeg and OpenCV C APIs") orelse false;
     const native_ffmpeg = b.option(bool, "native-ffmpeg", "Link the FFmpeg C API") orelse native_video;

@@ -5,11 +5,15 @@ const ffmpeg_cli = @import("legacy/ffmpeg_cli.zig");
 const media = @import("core/media.zig");
 const engine = @import("engine/engine.zig");
 const analyzer = engine.analyzer;
+const crop = engine.crop;
 const decoder = engine.decoder;
 const features = engine.features;
 const engine_types = engine.types;
 const motion = engine.motion;
+const renderer = engine.renderer;
+const session = engine.session;
 const trajectory = engine.trajectory;
+const warp = engine.warp;
 
 test "derives stabilized output beside source" {
     var buffer: [256]u8 = undefined;
@@ -276,6 +280,96 @@ test "native trajectory uses presentation time for VFR smoothing" {
     );
 }
 
+test "affine render matrix round-trips a point" {
+    const matrix = try warp.matrixFromCorrection(
+        .{ .x = 4, .y = -3, .angle = 0.12, .scale = 1.02 },
+        1.1,
+        1920,
+        1080,
+    );
+    const source = warp.Point{ .x = 613.25, .y = 417.75 };
+    const rendered = matrix.apply(source);
+    const recovered = try matrix.inverseMap(rendered);
+    try std.testing.expectApproxEqAbs(source.x, recovered.x, 0.000001);
+    try std.testing.expectApproxEqAbs(source.y, recovered.y, 0.000001);
+}
+
+test "crop planner finds minimum zoom for translation" {
+    const requirement = try crop.requiredZoom(
+        .{ .x = 10 },
+        100,
+        100,
+        .{ .max_zoom = 2 },
+    );
+    try std.testing.expect(!requirement.limited);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 1.2531645569),
+        requirement.zoom,
+        0.000001,
+    );
+}
+
+test "dynamic crop anticipates motion without crossing scenes" {
+    const corrections = [_]trajectory.Correction{
+        .{},
+        .{ .x = 10 },
+        .{},
+        .{},
+        .{},
+    };
+    const poses = [_]trajectory.Pose{
+        .{ .timestamp_seconds = 0, .segment = 0 },
+        .{ .timestamp_seconds = 0.1, .segment = 0 },
+        .{ .timestamp_seconds = 0.2, .segment = 0 },
+        .{ .timestamp_seconds = 0.3, .segment = 1 },
+        .{ .timestamp_seconds = 0.4, .segment = 1 },
+    };
+    const frames = try crop.plan(
+        std.testing.allocator,
+        &corrections,
+        &poses,
+        100,
+        100,
+        .{
+            .max_zoom = 2,
+            .dynamic_window_seconds = 0.11,
+        },
+    );
+    defer std.testing.allocator.free(frames);
+
+    try std.testing.expect(frames[0].zoom > 1.25);
+    try std.testing.expectApproxEqAbs(frames[0].zoom, frames[1].zoom, 0.000001);
+    try std.testing.expectApproxEqAbs(frames[1].zoom, frames[2].zoom, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), frames[3].zoom, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), frames[4].zoom, 0.000001);
+}
+
+test "disabled native session fails explicitly" {
+    if (session.native_enabled) return error.SkipZigTest;
+    try std.testing.expectError(
+        error.BackendNotEnabled,
+        session.Session.run(
+            std.testing.allocator,
+            "video.mp4",
+            .{},
+        ),
+    );
+}
+
+test "disabled native renderer fails explicitly" {
+    if (renderer.native_enabled) return error.SkipZigTest;
+    const empty_analysis: *const session.Analysis = undefined;
+    try std.testing.expectError(
+        error.BackendNotEnabled,
+        renderer.Renderer.run(
+            std.testing.allocator,
+            "video.mp4",
+            empty_analysis,
+            .{},
+        ),
+    );
+}
+
 test "analysis sequence preserves frame count and presentation order" {
     const time_base = engine_types.Rational{ .numerator = 1, .denominator = 60 };
     var validator = engine_types.SequenceValidator{};
@@ -408,6 +502,17 @@ test "analysis dimensions preserve aspect ratio without upscaling" {
     const small = try decoder.fitAnalysisDimensions(640, 360, 960);
     try std.testing.expectEqual(@as(u32, 640), small.width);
     try std.testing.expectEqual(@as(u32, 360), small.height);
+}
+
+test "decoder pixel formats report their storage width" {
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        decoder.PixelFormat.gray8.bytesPerPixel(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        decoder.PixelFormat.bgra8.bytesPerPixel(),
+    );
 }
 
 test "feature grid covers non-divisible image dimensions exactly" {
@@ -575,6 +680,28 @@ test "native motion estimator recovers a synthetic translation" {
     try std.testing.expect(estimate.inlier_points >= 12);
 }
 
+test "native BGRA warper preserves an identity frame" {
+    if (!warp.native_enabled) return error.SkipZigTest;
+
+    const width = 8;
+    const height = 6;
+    var source: [width * height * 4]u8 = undefined;
+    for (&source, 0..) |*channel, index| {
+        channel.* = @intCast(index % 251);
+    }
+    var destination: [source.len]u8 = undefined;
+    try warp.warpBgra(
+        &source,
+        width * 4,
+        &destination,
+        width * 4,
+        width,
+        height,
+        warp.AffineMatrix.identity(),
+    );
+    try std.testing.expectEqualSlices(u8, &source, &destination);
+}
+
 test "native decoder reports a missing input without leaking ownership" {
     if (!decoder.native_enabled) return error.SkipZigTest;
     try std.testing.expectError(error.OpenInputFailed, decoder.Decoder.open(
@@ -632,6 +759,38 @@ test "native decoder visits every frame in an integration fixture" {
     }
 }
 
+test "native decoder emits full-resolution BGRA render frames" {
+    if (!decoder.native_enabled) return error.SkipZigTest;
+    if (build_options.test_video.len == 0) return error.SkipZigTest;
+
+    var video_decoder = try decoder.Decoder.open(
+        std.testing.allocator,
+        build_options.test_video,
+        .{ .output_format = .bgra8 },
+    );
+    defer video_decoder.deinit();
+
+    const frame = try video_decoder.readFrame() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        video_decoder.info.source.width,
+        frame.width,
+    );
+    try std.testing.expectEqual(
+        video_decoder.info.source.height,
+        frame.height,
+    );
+    try std.testing.expectEqual(decoder.PixelFormat.bgra8, frame.format);
+    try std.testing.expectEqual(
+        @as(usize, frame.width) * 4,
+        frame.stride,
+    );
+    try std.testing.expectEqual(
+        frame.stride * @as(usize, frame.height),
+        frame.pixels.len,
+    );
+}
+
 test "native analyzer emits one valid record per decoded frame" {
     if (!analyzer.native_enabled) return error.SkipZigTest;
     if (build_options.test_video.len == 0 or
@@ -653,3 +812,86 @@ test "native analyzer emits one valid record per decoded frame" {
     }
     try validator.finish(build_options.test_video_frames);
 }
+
+test "native session builds a render plan for every frame" {
+    if (!session.native_enabled) return error.SkipZigTest;
+    if (build_options.test_video.len == 0 or
+        build_options.test_video_frames == 0)
+    {
+        return error.SkipZigTest;
+    }
+
+    var analysis = try session.Session.run(
+        std.testing.allocator,
+        build_options.test_video,
+        .{
+            .analyzer = .{
+                .decoder = .{ .max_analysis_dimension = 320 },
+            },
+            .crop = .{ .max_zoom = 2 },
+        },
+    );
+    defer analysis.deinit();
+
+    try std.testing.expectEqual(
+        @as(usize, @intCast(build_options.test_video_frames)),
+        analysis.frameCount(),
+    );
+    try std.testing.expectEqual(analysis.records.len, analysis.corrections.len);
+    try std.testing.expectEqual(analysis.records.len, analysis.crop_frames.len);
+    for (analysis.crop_frames) |frame| {
+        try std.testing.expect(frame.zoom >= frame.required_zoom);
+        try std.testing.expect(frame.zoom <= 2);
+    }
+    _ = try analysis.renderMatrix(analysis.frameCount() - 1);
+}
+
+test "native renderer submits every stabilized BGRA frame" {
+    if (!renderer.native_enabled) return error.SkipZigTest;
+    if (build_options.test_video.len == 0 or
+        build_options.test_video_frames == 0)
+    {
+        return error.SkipZigTest;
+    }
+
+    var analysis = try session.Session.run(
+        std.testing.allocator,
+        build_options.test_video,
+        .{
+            .analyzer = .{
+                .decoder = .{ .max_analysis_dimension = 320 },
+            },
+            .crop = .{ .max_zoom = 2 },
+        },
+    );
+    defer analysis.deinit();
+    var counter = RenderCounter{};
+    try renderer.Renderer.run(
+        std.testing.allocator,
+        build_options.test_video,
+        &analysis,
+        .{
+            .context = &counter,
+            .on_frame = RenderCounter.onFrame,
+        },
+    );
+    try std.testing.expectEqual(
+        build_options.test_video_frames,
+        counter.frame_count,
+    );
+    try std.testing.expect(counter.checksum > 0);
+}
+
+const RenderCounter = struct {
+    frame_count: u64 = 0,
+    checksum: u64 = 0,
+
+    fn onFrame(raw_context: ?*anyopaque, frame: renderer.Frame) bool {
+        const self: *RenderCounter = @ptrCast(@alignCast(raw_context.?));
+        self.frame_count += 1;
+        if (frame.pixels.len > 0) {
+            self.checksum +%= frame.pixels[frame.pixels.len / 2];
+        }
+        return true;
+    }
+};

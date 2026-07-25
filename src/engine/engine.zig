@@ -7,6 +7,10 @@ pub const features = @import("features.zig");
 pub const motion = @import("motion.zig");
 pub const analyzer = @import("analyzer.zig");
 pub const trajectory = @import("trajectory.zig");
+pub const warp = @import("warp.zig");
+pub const crop = @import("crop.zig");
+pub const session = @import("session.zig");
+pub const renderer = @import("renderer.zig");
 
 pub const Backend = enum {
     legacy,
@@ -25,8 +29,8 @@ pub const AvailabilityError = error{
     NativeExportNotImplemented,
 };
 
-/// Native analysis is available, but product selection remains blocked until
-/// warping and encoding can complete an export without the legacy backend.
+/// Native analysis and frame rendering are available, but product selection
+/// remains blocked until encoding and audio muxing complete an export.
 pub fn ensureSelectedBackendIsReady() AvailabilityError!void {
     if (selected_backend == .legacy) return;
     if (!native_dependencies_enabled) return error.NativeDependenciesDisabled;
