@@ -17,8 +17,15 @@ pub fn init() !void {
     errdefer rl.unloadFont(regular);
     semibold = try rl.loadFontFromMemory(".ttf", semibold_data[0..], 48, latin_codepoints[0..]);
 
-    rl.setTextureFilter(regular.texture, .bilinear);
-    rl.setTextureFilter(semibold.texture, .bilinear);
+    // A mágica acontece aqui: Mipmaps pre-calculam a redução da textura,
+    // preservando a espessura e a legibilidade da fonte em tamanhos menores (10px - 14px).
+    rl.genTextureMipmaps(&regular.texture);
+    rl.genTextureMipmaps(&semibold.texture);
+
+    // Trilinear avisa a GPU para usar os Mipmaps criados acima suavemente
+    rl.setTextureFilter(regular.texture, .trilinear);
+    rl.setTextureFilter(semibold.texture, .trilinear);
+    
     initialized = true;
 }
 

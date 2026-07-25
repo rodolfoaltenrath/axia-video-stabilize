@@ -188,12 +188,52 @@ const NativeMuxer = struct {
             if (source_video_index >= 0) {
                 const source_video =
                     source_input.streams[@intCast(source_video_index)];
+                
+                // Copia o dicionário de tags tradicionais
                 if (ffmpeg.av_dict_copy(
                     &output_video_stream.*.metadata,
                     source_video.*.metadata,
                     0,
                 ) < 0) {
                     return error.MetadataCopyFailed;
+                }
+
+                // RECUPERAÇÃO DA DISPLAY MATRIX (ROTAÇÃO 9:16)
+                // Checagem Comptime Segura para FFmpeg legado (até v6.x)
+                if (@hasField(ffmpeg.AVStream, "nb_side_data") and @hasDecl(ffmpeg, "av_stream_new_side_data")) {
+                    const nb_side: usize = @intCast(source_video.*.nb_side_data);
+                    for (0..nb_side) |i| {
+                        const sd = source_video.*.side_data[i];
+                        if (sd.type == ffmpeg.AV_PKT_DATA_DISPLAYMATRIX) {
+                            const dst = ffmpeg.av_stream_new_side_data(
+                                output_video_stream,
+                                sd.type,
+                                @intCast(sd.size),
+                            );
+                            if (dst != null) {
+                                const size: usize = @intCast(sd.size);
+                                @memcpy(dst[0..size], sd.data[0..size]);
+                            }
+                        }
+                    }
+                }
+
+                // Checagem Comptime Segura para FFmpeg moderno (v6.x, v7.x+)
+                if (@hasField(ffmpeg.AVCodecParameters, "nb_coded_side_data") and @hasDecl(ffmpeg, "av_packet_side_data_add")) {
+                    const nb_side: usize = @intCast(source_video.*.codecpar.*.nb_coded_side_data);
+                    for (0..nb_side) |i| {
+                        const sd = source_video.*.codecpar.*.coded_side_data[i];
+                        if (sd.type == ffmpeg.AV_PKT_DATA_DISPLAYMATRIX) {
+                            _ = ffmpeg.av_packet_side_data_add(
+                                &output_video_stream.*.codecpar.*.coded_side_data,
+                                &output_video_stream.*.codecpar.*.nb_coded_side_data,
+                                sd.type,
+                                sd.data,
+                                sd.size,
+                                0,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -432,7 +472,6 @@ fn writePacket(
     packet.pos = -1;
     const result = ffmpeg.av_interleaved_write_frame(output, packet);
     
-    // Libera a referência que criamos no av_read_frame em ambos os casos
     ffmpeg.av_packet_unref(packet);
     
     if (result < 0) {

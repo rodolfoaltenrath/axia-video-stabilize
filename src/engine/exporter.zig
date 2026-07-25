@@ -155,8 +155,8 @@ const NativeExporter = struct {
             return err;
         };
         try encoder.finish();
+        
         // Close AVIO before reopening the intermediate file for remuxing.
-        // This is required on Windows, where an open writer may deny reads.
         encoder.deinit();
         encoder_open = false;
 
@@ -174,6 +174,8 @@ const NativeExporter = struct {
             options.muxer,
         );
         if (options.observer.isCancelled()) return error.Cancelled;
+        
+        // A publicação final vai garantir que não haja conflitos de nome
         publishFile(partial_path, output_path) catch
             return error.PublishFailed;
         published = true;
@@ -254,6 +256,12 @@ fn deleteFile(path: []const u8) void {
 }
 
 fn publishFile(source: []const u8, destination: []const u8) !void {
+    // -------------------------------------------------------------
+    // FIX: O Windows recusa sobrescrever arquivos com rename. 
+    // Precisamos apagar o destino caso ele exista.
+    // -------------------------------------------------------------
+    deleteFile(destination);
+
     if (std.fs.path.isAbsolute(source) and
         std.fs.path.isAbsolute(destination))
     {
