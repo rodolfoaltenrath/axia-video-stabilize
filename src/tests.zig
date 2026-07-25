@@ -1,47 +1,15 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const app_state = @import("app_state.zig");
-const ffmpeg_cli = @import("core/ffmpeg_cli.zig");
+const ffmpeg_cli = @import("legacy/ffmpeg_cli.zig");
 const media = @import("core/media.zig");
-const stabilizer = @import("core/stabilizer.zig");
-const tracker = @import("core/tracker.zig");
-const trajectory = @import("core/trajectory.zig");
 const engine = @import("engine/engine.zig");
+const analyzer = engine.analyzer;
 const decoder = engine.decoder;
 const features = engine.features;
 const engine_types = engine.types;
-
-test "accumulates camera motion" {
-    const motions = [_]tracker.Motion{
-        .{ .dx = 2, .dy = -1, .dtheta = 0.1 },
-        .{ .dx = 3, .dy = 4, .dtheta = 0.2 },
-    };
-    const result = try stabilizer.accumulate(std.testing.allocator, &motions);
-    defer std.testing.allocator.free(result);
-    try std.testing.expectEqual(@as(f64, 5), result[1].x);
-    try std.testing.expectEqual(@as(f64, 3), result[1].y);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.3), result[1].angle, 0.000001);
-}
-
-test "moving average preserves constant trajectory" {
-    const input = [_]stabilizer.Transform{
-        .{ .x = 4, .y = 2, .angle = 0.1 },
-        .{ .x = 4, .y = 2, .angle = 0.1 },
-        .{ .x = 4, .y = 2, .angle = 0.1 },
-    };
-    const result = try stabilizer.smooth(std.testing.allocator, &input, 5);
-    defer std.testing.allocator.free(result);
-    for (result) |sample| {
-        try std.testing.expectEqual(@as(f64, 4), sample.x);
-        try std.testing.expectEqual(@as(f64, 2), sample.y);
-        try std.testing.expectApproxEqAbs(@as(f64, 0.1), sample.angle, 0.000001);
-    }
-}
-
-test "smoothness maps to a bounded radius" {
-    try std.testing.expectEqual(@as(usize, 0), stabilizer.radiusFromSmoothness(0, 30));
-    try std.testing.expectEqual(@as(usize, 60), stabilizer.radiusFromSmoothness(100, 30));
-}
+const motion = engine.motion;
+const trajectory = engine.trajectory;
 
 test "derives stabilized output beside source" {
     var buffer: [256]u8 = undefined;
@@ -169,27 +137,67 @@ test "cancellation is accepted only for active processing" {
 }
 
 test "frame trajectory includes identity pose" {
-    const motions = [_]trajectory.RelativeMotion{
-        .{ .dx = 2, .dy = -1, .dtheta = 0.1, .scale = 1.02 },
-        .{ .dx = 3, .dy = 4, .dtheta = 0.2, .scale = 1.01 },
+    const time_base = engine_types.Rational{ .numerator = 1, .denominator = 10 };
+    const records = [_]engine_types.AnalysisRecord{
+        engine_types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = time_base,
+        }, 0),
+        .{
+            .timing = .{ .index = 1, .pts = 1, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 2, .y = -1 },
+            .confidence = 1,
+        },
+        .{
+            .timing = .{ .index = 2, .pts = 2, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 3, .y = 4 },
+            .confidence = 1,
+        },
     };
-    const poses = try trajectory.integrate(std.testing.allocator, &motions);
+    const poses = try trajectory.integrateAnalysis(
+        std.testing.allocator,
+        &records,
+    );
     defer std.testing.allocator.free(poses);
 
     try std.testing.expectEqual(@as(usize, 3), poses.len);
     try std.testing.expectEqual(@as(f64, 0), poses[0].x);
     try std.testing.expectEqual(@as(f64, 5), poses[2].x);
     try std.testing.expectEqual(@as(f64, 3), poses[2].y);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.3), poses[2].angle, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.2), poses[2].timestamp_seconds, 0.000001);
 }
 
 test "scene cut starts an independent trajectory segment" {
-    const motions = [_]trajectory.RelativeMotion{
-        .{ .dx = 20 },
-        .{ .scene_cut = true },
-        .{ .dx = 3 },
+    const time_base = engine_types.Rational{ .numerator = 1, .denominator = 24 };
+    const records = [_]engine_types.AnalysisRecord{
+        engine_types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = time_base,
+        }, 0),
+        .{
+            .timing = .{ .index = 1, .pts = 1, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 20 },
+            .confidence = 1,
+        },
+        .{
+            .timing = .{ .index = 2, .pts = 2, .time_base = time_base },
+            .confidence = 1,
+            .scene_id = 1,
+            .flags = .{ .scene_cut = true },
+        },
+        .{
+            .timing = .{ .index = 3, .pts = 3, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 3 },
+            .confidence = 1,
+            .scene_id = 1,
+        },
     };
-    const poses = try trajectory.integrate(std.testing.allocator, &motions);
+    const poses = try trajectory.integrateAnalysis(
+        std.testing.allocator,
+        &records,
+    );
     defer std.testing.allocator.free(poses);
 
     try std.testing.expectEqual(@as(u32, 0), poses[1].segment);
@@ -200,12 +208,12 @@ test "scene cut starts an independent trajectory segment" {
 
 test "gaussian smoothing does not cross scene cuts" {
     const poses = [_]trajectory.Pose{
-        .{ .x = 0, .segment = 0 },
-        .{ .x = 0, .segment = 0 },
-        .{ .x = 100, .segment = 1 },
-        .{ .x = 100, .segment = 1 },
+        .{ .x = 0, .segment = 0, .timestamp_seconds = 0 },
+        .{ .x = 0, .segment = 0, .timestamp_seconds = 0.1 },
+        .{ .x = 100, .segment = 1, .timestamp_seconds = 0.2 },
+        .{ .x = 100, .segment = 1, .timestamp_seconds = 0.3 },
     };
-    const smoothed = try trajectory.smooth(std.testing.allocator, &poses, 10);
+    const smoothed = try trajectory.smoothTimed(std.testing.allocator, &poses, 10);
     defer std.testing.allocator.free(smoothed);
 
     try std.testing.expectApproxEqAbs(@as(f64, 0), smoothed[1].x, 0.000001);
@@ -214,11 +222,11 @@ test "gaussian smoothing does not cross scene cuts" {
 
 test "low confidence pose has little influence on smoothing" {
     const poses = [_]trajectory.Pose{
-        .{ .x = 0, .confidence = 1 },
-        .{ .x = 100, .confidence = 0 },
-        .{ .x = 0, .confidence = 1 },
+        .{ .x = 0, .confidence = 1, .timestamp_seconds = 0 },
+        .{ .x = 100, .confidence = 0, .timestamp_seconds = 1 },
+        .{ .x = 0, .confidence = 1, .timestamp_seconds = 2 },
     };
-    const smoothed = try trajectory.smooth(std.testing.allocator, &poses, 2);
+    const smoothed = try trajectory.smoothTimed(std.testing.allocator, &poses, 2);
     defer std.testing.allocator.free(smoothed);
 
     try std.testing.expect(smoothed[1].x < 1);
@@ -232,10 +240,40 @@ test "frame corrections include inverse scale delta" {
     const corrections = try trajectory.buildCorrections(std.testing.allocator, &raw, &smoothed);
     defer std.testing.allocator.free(corrections);
 
-    try std.testing.expectEqual(@as(f64, -4), corrections[0].x);
-    try std.testing.expectEqual(@as(f64, 2), corrections[0].y);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, -1.7614638249),
+        corrections[0].x,
+        0.000001,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 1.3774052394),
+        corrections[0].y,
+        0.000001,
+    );
     try std.testing.expectApproxEqAbs(@as(f64, -0.2), corrections[0].angle, 0.000001);
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), corrections[0].scale, 0.000001);
+}
+
+test "native trajectory uses presentation time for VFR smoothing" {
+    const poses = [_]trajectory.Pose{
+        .{ .x = 0, .timestamp_seconds = 0 },
+        .{ .x = 10, .timestamp_seconds = 0.1 },
+        .{ .x = 100, .timestamp_seconds = 4.0 },
+    };
+    const smoothed = try trajectory.smoothTimed(
+        std.testing.allocator,
+        &poses,
+        0.5,
+    );
+    defer std.testing.allocator.free(smoothed);
+
+    try std.testing.expect(smoothed[0].x > 0);
+    try std.testing.expect(smoothed[0].x < 10);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 100),
+        smoothed[2].x,
+        0.000001,
+    );
 }
 
 test "analysis sequence preserves frame count and presentation order" {
@@ -257,6 +295,7 @@ test "analysis sequence preserves frame count and presentation order" {
         },
         .global_motion_from_previous = .{ .x = 2, .y = -1, .angle = 0.01 },
         .confidence = 0.9,
+        .detected_points = 120,
         .tracked_points = 100,
         .inlier_points = 84,
         .residual_px = 0.7,
@@ -335,6 +374,7 @@ test "analysis record rejects invalid transform and point counts" {
     }).validate());
     try std.testing.expectError(error.InvalidPointCount, (engine_types.AnalysisRecord{
         .timing = timing,
+        .detected_points = 4,
         .tracked_points = 4,
         .inlier_points = 5,
     }).validate());
@@ -345,7 +385,7 @@ test "selected engine never falls back silently" {
         .legacy => try engine.ensureSelectedBackendIsReady(),
         .native => if (engine.native_dependencies_enabled)
             try std.testing.expectError(
-                error.NativeEngineNotImplemented,
+                error.NativeExportNotImplemented,
                 engine.ensureSelectedBackendIsReady(),
             )
         else
@@ -458,6 +498,83 @@ test "native Shi-Tomasi detector preserves spatial coverage" {
     for (occupied) |has_corner| try std.testing.expect(has_corner);
 }
 
+test "native motion estimator recovers a synthetic translation" {
+    if (!motion.native_enabled) return error.SkipZigTest;
+
+    const width = 160;
+    const height = 120;
+    var previous = [_]u8{0} ** (width * height);
+    var current = [_]u8{0} ** (width * height);
+    const shift_x = 3;
+    const shift_y = 2;
+    for (0..4) |row| {
+        for (0..5) |column| {
+            const left = 12 + column * 30;
+            const top = 12 + row * 27;
+            for (0..7) |square_y| {
+                @memset(
+                    previous[(top + square_y) * width + left .. (top + square_y) * width + left + 7],
+                    255,
+                );
+                @memset(
+                    current[(top + shift_y + square_y) * width +
+                        left + shift_x .. (top + shift_y + square_y) * width +
+                        left + shift_x + 7],
+                    255,
+                );
+            }
+        }
+    }
+
+    var estimator = try motion.Estimator.init(std.testing.allocator, .{
+        .features = .{
+            .grid_columns = 4,
+            .grid_rows = 3,
+            .max_per_cell = 16,
+            .min_distance = 3,
+            .border = 0,
+        },
+        .minimum_tracks = 12,
+    });
+    defer estimator.deinit();
+    const estimate = try estimator.estimate(
+        .{
+            .pixels = &previous,
+            .width = width,
+            .height = height,
+            .stride = width,
+        },
+        .{
+            .pixels = &current,
+            .width = width,
+            .height = height,
+            .stride = width,
+        },
+    );
+
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_x),
+        estimate.transform.x,
+        0.35,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_y),
+        estimate.transform.y,
+        0.35,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 0),
+        estimate.transform.angle,
+        0.01,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 1),
+        estimate.transform.scale,
+        0.01,
+    );
+    try std.testing.expect(estimate.inlier_points >= 12);
+}
+
 test "native decoder reports a missing input without leaking ownership" {
     if (!decoder.native_enabled) return error.SkipZigTest;
     try std.testing.expectError(error.OpenInputFailed, decoder.Decoder.open(
@@ -513,4 +630,26 @@ test "native decoder visits every frame in an integration fixture" {
     if (build_options.test_video_require_vfr) {
         try std.testing.expect(has_variable_delta);
     }
+}
+
+test "native analyzer emits one valid record per decoded frame" {
+    if (!analyzer.native_enabled) return error.SkipZigTest;
+    if (build_options.test_video.len == 0 or
+        build_options.test_video_frames == 0)
+    {
+        return error.SkipZigTest;
+    }
+
+    var video_analyzer = try analyzer.Analyzer.open(
+        std.testing.allocator,
+        build_options.test_video,
+        .{ .decoder = .{ .max_analysis_dimension = 320 } },
+    );
+    defer video_analyzer.deinit();
+
+    var validator = engine_types.SequenceValidator{};
+    while (try video_analyzer.read()) |record| {
+        try validator.push(record);
+    }
+    try validator.finish(build_options.test_video_frames);
 }

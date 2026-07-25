@@ -1,6 +1,6 @@
 const std = @import("std");
 const state_mod = @import("../app_state.zig");
-const stabilizer = @import("stabilizer.zig");
+const legacy_parameters = @import("parameters.zig");
 
 pub const CliError = error{
     ToolNotFound,
@@ -174,7 +174,10 @@ pub fn render(
 
     const fps = info.framesPerSecond();
     if (!std.math.isFinite(fps) or fps <= 0) return error.InvalidFrameRate;
-    const smoothing = stabilizer.radiusFromSmoothness(parameters.smoothness, @floatCast(fps));
+    const smoothing = legacy_parameters.smoothingRadius(
+        parameters.smoothness,
+        @floatCast(fps),
+    );
     const optzoom: u8 = if (parameters.dynamic_crop) 2 else 1;
     const crop = std.math.clamp(parameters.crop, 0.0, 30.0);
     const filter = try std.fmt.allocPrint(

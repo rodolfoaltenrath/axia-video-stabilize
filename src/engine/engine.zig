@@ -4,6 +4,9 @@ const build_options = @import("build_options");
 pub const types = @import("types.zig");
 pub const decoder = @import("decoder.zig");
 pub const features = @import("features.zig");
+pub const motion = @import("motion.zig");
+pub const analyzer = @import("analyzer.zig");
+pub const trajectory = @import("trajectory.zig");
 
 pub const Backend = enum {
     legacy,
@@ -19,15 +22,15 @@ pub const native_dependencies_enabled =
 
 pub const AvailabilityError = error{
     NativeDependenciesDisabled,
-    NativeEngineNotImplemented,
+    NativeExportNotImplemented,
 };
 
-/// Fails explicitly while the native implementation is being built instead of
-/// silently routing a `-Dengine=native` build through libvidstab.
+/// Native analysis is available, but product selection remains blocked until
+/// warping and encoding can complete an export without the legacy backend.
 pub fn ensureSelectedBackendIsReady() AvailabilityError!void {
     if (selected_backend == .legacy) return;
     if (!native_dependencies_enabled) return error.NativeDependenciesDisabled;
-    return error.NativeEngineNotImplemented;
+    return error.NativeExportNotImplemented;
 }
 
 test "engine module has a valid compile-time backend" {

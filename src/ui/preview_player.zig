@@ -1,6 +1,6 @@
 const std = @import("std");
 const rl = @import("raylib");
-const ffmpeg_cli = @import("../core/ffmpeg_cli.zig");
+const ffmpeg_cli = @import("../legacy/ffmpeg_cli.zig");
 const media = @import("../core/media.zig");
 
 const max_preview_width: u32 = 960;

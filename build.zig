@@ -16,9 +16,8 @@ pub fn build(b: *std.Build) void {
         "Stabilization engine to use: legacy or native",
     ) orelse .legacy;
 
-    // FFmpeg/OpenCV are optional while the UI and pipeline skeleton are being
-    // developed. Enable them with -Dnative-video=true once their development
-    // libraries are installed on the host or in the supplied search paths.
+    // FFmpeg/OpenCV are optional while native rendering and encoding are being
+    // completed. `native-video` is the convenience switch for both APIs.
     const native_video = b.option(bool, "native-video", "Link FFmpeg and OpenCV C APIs") orelse false;
     const native_ffmpeg = b.option(bool, "native-ffmpeg", "Link the FFmpeg C API") orelse native_video;
     const native_opencv = b.option(bool, "native-opencv", "Link the OpenCV bridge") orelse native_video;
@@ -53,7 +52,6 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(EngineBackend, "engine_backend", engine_backend);
-    build_options.addOption(bool, "native_video", native_video);
     build_options.addOption(bool, "native_ffmpeg", native_ffmpeg);
     build_options.addOption(bool, "native_opencv", native_opencv);
     build_options.addOption([]const u8, "test_video", test_video);
@@ -72,6 +70,7 @@ pub fn build(b: *std.Build) void {
         ffmpeg_lib,
         opencv_include,
         opencv_lib,
+        target.result.os.tag,
         b.path("native/opencv_bridge.cpp"),
         b.path("native"),
     );
@@ -110,6 +109,7 @@ pub fn build(b: *std.Build) void {
         ffmpeg_lib,
         opencv_include,
         opencv_lib,
+        target.result.os.tag,
         b.path("native/opencv_bridge.cpp"),
         b.path("native"),
     );
@@ -142,6 +142,7 @@ pub fn build(b: *std.Build) void {
         ffmpeg_lib,
         opencv_include,
         opencv_lib,
+        target.result.os.tag,
         b.path("native/opencv_bridge.cpp"),
         b.path("native"),
     );
@@ -159,6 +160,7 @@ fn linkNativeDependencies(
     ffmpeg_lib: ?[]const u8,
     opencv_include: ?[]const u8,
     opencv_lib: ?[]const u8,
+    target_os: std.Target.Os.Tag,
     opencv_bridge: std.Build.LazyPath,
     bridge_include: std.Build.LazyPath,
 ) void {
@@ -180,25 +182,34 @@ fn linkNativeDependencies(
         });
         artifact.linkLibCpp();
 
-        // OpenCV's MinGW naming includes the ABI version in import libraries.
-        // Keep these explicit: accidentally resolving MSVC binaries would make
-        // the C++ side of the bridge ABI-incompatible with Zig.
         if (opencv_lib) |path| {
-            for ([_][]const u8{
-                "libopencv_core4130.dll.a",
-                "libopencv_imgproc4130.dll.a",
-                "libopencv_video4130.dll.a",
-                "libopencv_calib3d4130.dll.a",
-            }) |library| {
-                artifact.addObjectFile(.{
-                    .cwd_relative = b.pathJoin(&.{ path, library }),
-                });
-            }
-        } else {
-            artifact.linkSystemLibrary("opencv_core4130");
-            artifact.linkSystemLibrary("opencv_imgproc4130");
-            artifact.linkSystemLibrary("opencv_video4130");
-            artifact.linkSystemLibrary("opencv_calib3d4130");
+            artifact.addLibraryPath(.{ .cwd_relative = path });
+        }
+        switch (target_os) {
+            .windows => if (opencv_lib) |path| {
+                // MinGW import libraries carry the OpenCV ABI version.
+                for ([_][]const u8{
+                    "libopencv_core4130.dll.a",
+                    "libopencv_imgproc4130.dll.a",
+                    "libopencv_video4130.dll.a",
+                    "libopencv_calib3d4130.dll.a",
+                }) |library| {
+                    artifact.addObjectFile(.{
+                        .cwd_relative = b.pathJoin(&.{ path, library }),
+                    });
+                }
+            } else {
+                artifact.linkSystemLibrary("opencv_core4130");
+                artifact.linkSystemLibrary("opencv_imgproc4130");
+                artifact.linkSystemLibrary("opencv_video4130");
+                artifact.linkSystemLibrary("opencv_calib3d4130");
+            },
+            else => {
+                artifact.linkSystemLibrary("opencv_core");
+                artifact.linkSystemLibrary("opencv_imgproc");
+                artifact.linkSystemLibrary("opencv_video");
+                artifact.linkSystemLibrary("opencv_calib3d");
+            },
         }
     }
 }

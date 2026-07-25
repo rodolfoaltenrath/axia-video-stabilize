@@ -1,6 +1,6 @@
 const std = @import("std");
 const state_mod = @import("../app_state.zig");
-const ffmpeg_cli = @import("../core/ffmpeg_cli.zig");
+const ffmpeg_cli = @import("../legacy/ffmpeg_cli.zig");
 const engine = @import("../engine/engine.zig");
 
 const Job = union(enum) {
@@ -28,8 +28,8 @@ pub const ThreadPool = struct {
     }
 
     pub fn destroy(self: *ThreadPool) void {
-        // The CLI backend currently observes cancellation between FFmpeg passes.
-        // Mid-pass process termination is implemented in the next milestone.
+        // Cancellation is observed while FFmpeg progress is streamed, allowing
+        // shutdown to terminate an active legacy pass before joining.
         self.state.requestCancel();
         self.mutex.lock();
         self.stopping = true;
@@ -131,6 +131,10 @@ pub const ThreadPool = struct {
             .duration_seconds = info.duration_seconds,
         };
         self.state.updateFrameProgress(.rendering, 0.74, 0, total_frames, 0);
+        var keep_output = false;
+        defer if (!keep_output) {
+            std.fs.deleteFileAbsolute(config.media.output()) catch {};
+        };
         try ffmpeg_cli.render(
             self.allocator,
             config.media.input(),
@@ -141,10 +145,8 @@ pub const ThreadPool = struct {
             info,
             render_progress.observer(),
         );
-        if (self.finishIfCancelled()) {
-            std.fs.deleteFileAbsolute(config.media.output()) catch {};
-            return;
-        }
+        if (self.finishIfCancelled()) return;
+        keep_output = true;
         self.state.complete();
     }
 
@@ -171,7 +173,7 @@ fn messageForError(err: anyerror) []const u8 {
         error.RenderFailed => "A renderização falhou. Consulte o log para detalhes.",
         error.DistortionModeNotImplemented => "O modo de distorção ainda não está disponível.",
         error.NativeDependenciesDisabled => "O engine nativo exige um build com -Dnative-video=true.",
-        error.NativeEngineNotImplemented => "O engine nativo ainda está em construção. Use -Dengine=legacy.",
+        error.NativeExportNotImplemented => "A análise nativa está pronta; warp e encode ainda exigem -Dengine=legacy.",
         else => "Falha inesperada no pipeline de estabilização.",
     };
 }

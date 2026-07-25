@@ -4,10 +4,16 @@ Desktop video-stabilization workspace for Windows and Linux, written in Zig.
 The project is evolving from a responsive UI prototype into a real automatic
 stabilization pipeline.
 
-The current implementation uses FFmpeg and libvidstab as the first functional
-two-pass backend. The planned native engine contracts live in `src/core` and
-will progressively replace the CLI bridge with native decoding, tracking,
-trajectory optimization, rolling-shutter correction and warping.
+The current product backend uses FFmpeg and libvidstab as the first functional
+two-pass exporter. It is isolated in `src/legacy` and will be removed after the
+native renderer and encoder reach feature parity.
+
+The native engine lives in `src/engine`. It currently provides frame-exact
+FFmpeg decoding, presentation timestamps for CFR/VFR media, spatially
+distributed Shi-Tomasi features, forward/backward pyramidal Lucas-Kanade
+tracking, RANSAC similarity transforms, scene segmentation and
+confidence-weighted, timestamp-aware trajectory smoothing. Native warping,
+adaptive crop, encoding and audio muxing are the remaining end-to-end stages.
 
 ## Requirements
 
@@ -39,7 +45,7 @@ skip controls, space-bar control and a seek bar below the image. FFmpeg streams
 at most 960x540 and 60 fps with one RGBA frame ahead into a reusable Raylib
 texture, keeping memory bounded regardless of the source duration.
 
-Enable native video libraries when installed in standard system locations:
+Enable native analysis libraries when installed in standard system locations:
 
 ```text
 zig build run -Dnative-video=true
@@ -59,8 +65,19 @@ The same pipeline is also available without the graphical window:
 zig build cli -- input.mp4 output.mp4
 ```
 
+`-Dengine=native` is intentionally rejected until native rendering and
+encoding are implemented; it never falls back silently to libvidstab.
+
 Run the reproducible end-to-end smoke test on Windows:
 
 ```text
 powershell -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
+```
+
+Native integration tests are split by dependency and can be run with:
+
+```text
+powershell -ExecutionPolicy Bypass -File scripts/test-native-decoder.ps1
+powershell -ExecutionPolicy Bypass -File scripts/test-native-features.ps1
+powershell -ExecutionPolicy Bypass -File scripts/test-native-analyzer.ps1
 ```

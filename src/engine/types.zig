@@ -99,6 +99,7 @@ pub const AnalysisRecord = struct {
     timing: FrameTiming,
     global_motion_from_previous: SimilarityTransform = .{},
     confidence: f32 = 0,
+    detected_points: u32 = 0,
     tracked_points: u32 = 0,
     inlier_points: u32 = 0,
     residual_px: f32 = 0,
@@ -123,7 +124,9 @@ pub const AnalysisRecord = struct {
         {
             return error.InvalidConfidence;
         }
-        if (self.inlier_points > self.tracked_points) {
+        if (self.tracked_points > self.detected_points or
+            self.inlier_points > self.tracked_points)
+        {
             return error.InvalidPointCount;
         }
         if (!std.math.isFinite(self.residual_px) or self.residual_px < 0) {
