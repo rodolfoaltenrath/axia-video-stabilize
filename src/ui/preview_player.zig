@@ -1,6 +1,5 @@
 const std = @import("std");
 const rl = @import("raylib");
-const media = @import("../core/media.zig");
 const decoder_mod = @import("../engine/decoder.zig");
 
 const max_preview_width: u32 = 960;
@@ -71,13 +70,28 @@ pub const Player = struct {
         );
         defer metadata_decoder.deinit();
         const info = metadata_decoder.info;
-        const size = media.fitPreviewSize(
-            info.source.width,
-            info.source.height,
-            max_preview_width,
-            max_preview_height,
-        );
-        const pixel_count = std.math.mul(usize, size.width, size.height) catch
+
+        // --- KISS: Cálculo direto de proporção (Aspect Ratio) perfeito ---
+        const source_w: f64 = @floatFromInt(info.source.width);
+        const source_h: f64 = @floatFromInt(info.source.height);
+        const max_w: f64 = @floatFromInt(max_preview_width);
+        const max_h: f64 = @floatFromInt(max_preview_height);
+        
+        // Descobre qual limite (largura ou altura) precisamos respeitar para caber na tela
+        const scale = @min(max_w / source_w, max_h / source_h);
+        const final_scale = @min(scale, 1.0); // Não estica vídeos pequenos
+        
+        var final_w: u32 = @intFromFloat(source_w * final_scale);
+        var final_h: u32 = @intFromFloat(source_h * final_scale);
+        
+        // O FFmpeg (e muitos encoders) exigem dimensões pares
+        final_w -= final_w % 2;
+        final_h -= final_h % 2;
+
+        if (final_w == 0 or final_h == 0) return error.PreviewTooSmall;
+        // -----------------------------------------------------------------
+
+        const pixel_count = std.math.mul(usize, final_w, final_h) catch
             return error.PreviewTooLarge;
         const byte_count = std.math.mul(usize, pixel_count, bytes_per_pixel) catch
             return error.PreviewTooLarge;
@@ -86,16 +100,16 @@ pub const Player = struct {
         self.pixels = try self.allocator.alloc(u8, byte_count);
 
         const image = rl.genImageColor(
-            @intCast(size.width),
-            @intCast(size.height),
+            @intCast(final_w),
+            @intCast(final_h),
             rl.Color.black,
         );
         defer rl.unloadImage(image);
         self.texture = try rl.loadTextureFromImage(image);
         rl.setTextureFilter(self.texture.?, .bilinear);
 
-        self.width = size.width;
-        self.height = size.height;
+        self.width = final_w;
+        self.height = final_h;
         const fps = info.framesPerSecond() orelse
             if (info.estimated_frame_count != null and
             info.duration_seconds != null and
@@ -289,6 +303,7 @@ pub const Player = struct {
             "-loglevel",
             "error",
             "-nostdin",
+            "-noautorotate", // <-- Adicionado para evitar que o FFmpeg gire e estique a imagem automaticamente
             "-ss",
             seek_text,
             "-i",

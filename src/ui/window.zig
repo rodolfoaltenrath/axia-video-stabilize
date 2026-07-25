@@ -4,6 +4,7 @@ const state_mod = @import("../app_state.zig");
 const components = @import("components.zig");
 const preview_player = @import("preview_player.zig");
 const theme = @import("theme.zig");
+const fonts = @import("fonts.zig");
 
 pub const UiResult = struct {
     parameters: state_mod.Parameters,
@@ -71,17 +72,12 @@ fn drawTopBar(width: f32, height: f32, snapshot: state_mod.Snapshot) TopBarActio
     const busy = snapshot.phase.isBusy();
     return .{
         .import_requested = components.button(
-            .{ .x = width - 306, .y = 14, .width = 132, .height = 38 },
+            .{ .x = width - 152, .y = 14, .width = 132, .height = 38 },
             "IMPORTAR VÍDEO",
             .secondary,
             !busy,
         ),
-        .start_requested = components.button(
-            .{ .x = width - 162, .y = 14, .width = 146, .height = 38 },
-            "ESTABILIZAR",
-            .primary,
-            snapshot.media.hasInput() and !busy,
-        ),
+        .start_requested = false, // O botão superior de estabilizar foi removido para focar a ação no painel lateral
     };
 }
 
@@ -124,13 +120,33 @@ fn drawPreview(
     }
 
     if (snapshot.media.hasInput()) {
-        components.text(snapshot.media.name(), viewport.x + 18, viewport.y + viewport.height - 30, 12, rl.Color.init(210, 218, 229, 180));
+        const name = snapshot.media.name();
+        const text_size = fonts.measure(name, 12, .regular);
+        const pill = rl.Rectangle{
+            .x = viewport.x + 10,
+            .y = viewport.y + viewport.height - 34,
+            .width = text_size.x + 16,
+            .height = 24,
+        };
+        rl.drawRectangleRounded(pill, 0.5, 8, rl.Color.init(0, 0, 0, 160));
+        components.text(name, pill.x + 8, pill.y + 6, 12, rl.Color.init(231, 235, 242, 255));
     } else {
-        components.text("IMPORTE UM VÍDEO PARA COMEÇAR", viewport.x + 18, viewport.y + viewport.height - 30, 12, rl.Color.init(210, 218, 229, 180));
+        const msg = "IMPORTE UM VÍDEO PARA COMEÇAR";
+        const text_size = fonts.measure(msg, 12, .regular);
+        const pill = rl.Rectangle{
+            .x = viewport.x + 10,
+            .y = viewport.y + viewport.height - 34,
+            .width = text_size.x + 16,
+            .height = 24,
+        };
+        rl.drawRectangleRounded(pill, 0.5, 8, rl.Color.init(0, 0, 0, 160));
+        components.text(msg, pill.x + 8, pill.y + 6, 12, rl.Color.init(231, 235, 242, 255));
     }
+    
     if (preview.failed) {
         components.text("PREVIEW INDISPONÍVEL", viewport.x + 18, viewport.y + 18, 12, theme.danger);
     }
+    
     const controls_width = @min(area.width - 40, @max(viewport.width, 460));
     return drawPreviewControls(.{
         .x = area.x + (area.width - controls_width) * 0.5,
@@ -353,7 +369,7 @@ fn drawTimeline(
             .{ .x = x, .y = track.y - 10 },
             .{ .x = x, .y = track.y - tick_height },
             1,
-            theme.border,
+            rl.Color.init(80, 90, 110, 255), // Nova cor sutil para os divisores
         );
     }
 
@@ -365,8 +381,32 @@ fn drawTimeline(
             .height = track.height - 16,
         };
         rl.drawRectangleRounded(clip, 0.08, 6, theme.accent_soft);
+        
+        // Efeito de inner glow (vidro) no clipe
+        const inner_clip = rl.Rectangle{
+            .x = clip.x + 1,
+            .y = clip.y + 1,
+            .width = clip.width - 2,
+            .height = clip.height - 2,
+        };
+        rl.drawRectangleRoundedLinesEx(inner_clip, 0.08, 6, 1, rl.Color.init(255, 255, 255, 25));
         rl.drawRectangleRoundedLinesEx(clip, 0.08, 6, 1, theme.accent);
-        components.text(snapshot.media.name(), clip.x + 12, clip.y + 18, 12, theme.text);
+        
+        components.textStrong(snapshot.media.name(), clip.x + 12, clip.y + 18, 12, theme.text);
+
+        // Renderiza o tempo total dentro do próprio bloco do clipe se ele não for muito esmagado
+        if (clip.width > 150) {
+            const dur_total: u64 = @intFromFloat(@max(0.0, @floor(preview.duration_seconds)));
+            var dur_buf: [16]u8 = undefined;
+            const dur_text = std.fmt.bufPrintZ(
+                &dur_buf,
+                "{d:0>2}:{d:0>2}",
+                .{ dur_total / 60, dur_total % 60 },
+            ) catch "00:00";
+            
+            const dur_size = fonts.measure(dur_text, 11, .regular);
+            components.text(dur_text, clip.x + clip.width - dur_size.x - 12, clip.y + 19, 11, theme.accent);
+        }
 
         const playhead_x = track.x + track.width * preview.progress();
         rl.drawLineEx(
