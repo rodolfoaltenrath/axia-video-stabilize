@@ -84,6 +84,13 @@ pub const ThreadPool = struct {
         try engine.ensureSelectedBackendIsReady();
         if (config.parameters.mode == .distortion) return error.DistortionModeNotImplemented;
 
+        switch (engine.selected_backend) {
+            .legacy => try self.runLegacyPipeline(config),
+            .native => try self.runNativePipeline(config),
+        }
+    }
+
+    fn runLegacyPipeline(self: *ThreadPool, config: state_mod.JobConfig) !void {
         self.state.update(.loading, 0.02);
         const info = try ffmpeg_cli.probe(self.allocator, config.media.input());
         const total_frames = info.estimatedFrameCount();
@@ -150,6 +157,38 @@ pub const ThreadPool = struct {
         self.state.complete();
     }
 
+    fn runNativePipeline(self: *ThreadPool, config: state_mod.JobConfig) !void {
+        self.state.update(.loading, 0.02);
+        var progress = NativeProgress{ .state = self.state };
+        const normalized_smoothness =
+            std.math.clamp(config.parameters.smoothness, 0.0, 100.0) / 100.0;
+        const crop_fraction =
+            std.math.clamp(config.parameters.crop, 0.0, 30.0) / 100.0;
+        _ = try engine.exporter.Exporter.run(
+            self.allocator,
+            config.media.input(),
+            config.media.output(),
+            .{
+                .session = .{
+                    .smoothing_radius_seconds = normalized_smoothness * normalized_smoothness * 2.0,
+                    .crop = .{
+                        .mode = if (config.parameters.dynamic_crop)
+                            .dynamic
+                        else
+                            .static,
+                        .extra_crop_fraction = crop_fraction,
+                    },
+                },
+                .observer = .{
+                    .context = &progress,
+                    .on_progress = NativeProgress.onProgress,
+                    .should_cancel = NativeProgress.shouldCancel,
+                },
+            },
+        );
+        self.state.complete();
+    }
+
     fn finishIfCancelled(self: *ThreadPool) bool {
         if (!self.state.shouldCancel()) return false;
         self.state.update(.cancelled, 0.0);
@@ -173,10 +212,56 @@ fn messageForError(err: anyerror) []const u8 {
         error.RenderFailed => "A renderização falhou. Consulte o log para detalhes.",
         error.DistortionModeNotImplemented => "O modo de distorção ainda não está disponível.",
         error.NativeDependenciesDisabled => "O engine nativo exige um build com -Dnative-video=true.",
-        error.NativeExportNotImplemented => "Análise e warp nativos estão prontos; encode e áudio ainda exigem -Dengine=legacy.",
+        error.EncoderNotFound => "Nenhum encoder H.264 compatível foi encontrado no FFmpeg.",
+        error.HeaderWriteFailed => "O contêiner MP4 rejeitou um dos streams de vídeo ou áudio.",
+        error.PacketWriteFailed, error.TrailerWriteFailed, error.PublishFailed => "Não foi possível finalizar o MP4 estabilizado.",
         else => "Falha inesperada no pipeline de estabilização.",
     };
 }
+
+const NativeProgress = struct {
+    state: *state_mod.AppState,
+
+    fn onProgress(
+        raw_context: ?*anyopaque,
+        progress: engine.exporter.Progress,
+    ) void {
+        const self: *NativeProgress = @ptrCast(@alignCast(raw_context.?));
+        const total = progress.total_frames orelse
+            @max(progress.processed_frames, 1);
+        const ratio: f32 =
+            @floatCast(@as(f64, @floatFromInt(progress.processed_frames)) /
+            @as(f64, @floatFromInt(total)));
+        const phase: state_mod.Phase = switch (progress.stage) {
+            .analyzing => .analyzing,
+            .rendering, .muxing, .completed => .rendering,
+        };
+        const start: f32 = switch (progress.stage) {
+            .analyzing => 0.04,
+            .rendering => 0.70,
+            .muxing => 0.96,
+            .completed => 1.0,
+        };
+        const end: f32 = switch (progress.stage) {
+            .analyzing => 0.67,
+            .rendering => 0.94,
+            .muxing => 0.99,
+            .completed => 1.0,
+        };
+        self.state.updateFrameProgress(
+            phase,
+            start + (end - start) * std.math.clamp(ratio, 0.0, 1.0),
+            progress.processed_frames,
+            total,
+            0,
+        );
+    }
+
+    fn shouldCancel(raw_context: ?*anyopaque) bool {
+        const self: *NativeProgress = @ptrCast(@alignCast(raw_context.?));
+        return self.state.shouldCancel();
+    }
+};
 
 const StageProgress = struct {
     state: *state_mod.AppState,

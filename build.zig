@@ -16,8 +16,8 @@ pub fn build(b: *std.Build) void {
         "Stabilization engine to use: legacy or native",
     ) orelse .legacy;
 
-    // FFmpeg/OpenCV are optional while native encoding and audio muxing are
-    // completed. `native-video` is the convenience switch for both APIs.
+    // FFmpeg/OpenCV remain optional for legacy builds. `native-video` is the
+    // convenience switch required by the complete native export pipeline.
     const native_video = b.option(bool, "native-video", "Link FFmpeg and OpenCV C APIs") orelse false;
     const native_ffmpeg = b.option(bool, "native-ffmpeg", "Link the FFmpeg C API") orelse native_video;
     const native_opencv = b.option(bool, "native-opencv", "Link the OpenCV bridge") orelse native_video;
@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
     const opencv_lib = if (opencv_lib_option) |path| path else native_lib;
     const test_video = b.option([]const u8, "test-video", "Video fixture for native decoder tests") orelse "";
     const test_video_frames = b.option(u64, "test-video-frames", "Expected decoded fixture frame count") orelse 0;
+    const test_video_audio_streams = b.option(u32, "test-video-audio-streams", "Expected audio streams in the native fixture") orelse 0;
     const test_video_require_vfr = b.option(bool, "test-video-require-vfr", "Require varying fixture PTS deltas") orelse false;
 
     const raylib_dep = b.dependency("raylib_zig", .{
@@ -56,6 +57,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "native_opencv", native_opencv);
     build_options.addOption([]const u8, "test_video", test_video);
     build_options.addOption(u64, "test_video_frames", test_video_frames);
+    build_options.addOption(u32, "test_video_audio_streams", test_video_audio_streams);
     build_options.addOption(bool, "test_video_require_vfr", test_video_require_vfr);
     exe.root_module.addOptions("build_options", build_options);
     exe.root_module.addImport("raylib", raylib_dep.module("raylib"));

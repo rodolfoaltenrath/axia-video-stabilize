@@ -24,6 +24,17 @@ pub fn main() !void {
     else
         try media.deriveOutputPath(&output_buffer, input_path);
 
+    switch (engine.selected_backend) {
+        .legacy => try runLegacy(allocator, input_path, output_path),
+        .native => try runNative(allocator, input_path, output_path),
+    }
+}
+
+fn runLegacy(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    output_path: []const u8,
+) !void {
     std.debug.print("Axia: lendo metadados de {s}\n", .{input_path});
     const info = try ffmpeg_cli.probe(allocator, input_path);
     std.debug.print(
@@ -67,6 +78,53 @@ pub fn main() !void {
     );
     std.debug.print("Axia: concluído em {s}\n", .{output_path});
 }
+
+fn runNative(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    output_path: []const u8,
+) !void {
+    std.debug.print("Axia: iniciando pipeline nativo para {s}\n", .{input_path});
+    var progress = NativeCliProgress{};
+    const result = try engine.exporter.Exporter.run(
+        allocator,
+        input_path,
+        output_path,
+        .{
+            .observer = .{
+                .context = &progress,
+                .on_progress = NativeCliProgress.onProgress,
+            },
+        },
+    );
+    std.debug.print(
+        "Axia: concluído em {s} ({d} frames, {d} faixas de áudio)\n",
+        .{ output_path, result.frames, result.audio_streams },
+    );
+}
+
+const NativeCliProgress = struct {
+    fn onProgress(
+        raw_context: ?*anyopaque,
+        progress: engine.exporter.Progress,
+    ) void {
+        _ = raw_context;
+        const total = progress.total_frames orelse 0;
+        std.debug.print(
+            "Axia: {s} frame {d}/{d}\n",
+            .{ stageLabel(progress.stage), progress.processed_frames, total },
+        );
+    }
+
+    fn stageLabel(stage: engine.exporter.Stage) []const u8 {
+        return switch (stage) {
+            .analyzing => "análise",
+            .rendering => "render",
+            .muxing => "mux",
+            .completed => "concluído",
+        };
+    }
+};
 
 const CliProgress = struct {
     label: []const u8,

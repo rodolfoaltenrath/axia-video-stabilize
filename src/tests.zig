@@ -7,9 +7,12 @@ const engine = @import("engine/engine.zig");
 const analyzer = engine.analyzer;
 const crop = engine.crop;
 const decoder = engine.decoder;
+const encoder = engine.encoder;
+const exporter = engine.exporter;
 const features = engine.features;
 const engine_types = engine.types;
 const motion = engine.motion;
+const muxer = engine.muxer;
 const renderer = engine.renderer;
 const session = engine.session;
 const trajectory = engine.trajectory;
@@ -370,6 +373,47 @@ test "disabled native renderer fails explicitly" {
     );
 }
 
+test "disabled native encoder fails explicitly" {
+    if (encoder.native_enabled) return error.SkipZigTest;
+    try std.testing.expectError(
+        error.BackendNotEnabled,
+        encoder.Encoder.create(
+            std.testing.allocator,
+            "output.mp4",
+            .{ .width = 320, .height = 180 },
+            .{ .numerator = 1, .denominator = 30 },
+            .{},
+        ),
+    );
+}
+
+test "disabled native muxer fails explicitly" {
+    if (muxer.native_enabled) return error.SkipZigTest;
+    try std.testing.expectError(
+        error.BackendNotEnabled,
+        muxer.Muxer.run(
+            std.testing.allocator,
+            "video.mp4",
+            "source.mp4",
+            "output.mp4",
+            .{},
+        ),
+    );
+}
+
+test "disabled native exporter fails explicitly" {
+    if (exporter.native_enabled) return error.SkipZigTest;
+    try std.testing.expectError(
+        error.BackendNotEnabled,
+        exporter.Exporter.run(
+            std.testing.allocator,
+            "input.mp4",
+            "output.mp4",
+            .{},
+        ),
+    );
+}
+
 test "analysis sequence preserves frame count and presentation order" {
     const time_base = engine_types.Rational{ .numerator = 1, .denominator = 60 };
     var validator = engine_types.SequenceValidator{};
@@ -478,10 +522,7 @@ test "selected engine never falls back silently" {
     switch (engine.selected_backend) {
         .legacy => try engine.ensureSelectedBackendIsReady(),
         .native => if (engine.native_dependencies_enabled)
-            try std.testing.expectError(
-                error.NativeExportNotImplemented,
-                engine.ensureSelectedBackendIsReady(),
-            )
+            try engine.ensureSelectedBackendIsReady()
         else
             try std.testing.expectError(
                 error.NativeDependenciesDisabled,
@@ -882,6 +923,119 @@ test "native renderer submits every stabilized BGRA frame" {
     try std.testing.expect(counter.checksum > 0);
 }
 
+test "native encoder and muxer produce a playable MP4 container" {
+    if (!encoder.native_enabled or !muxer.native_enabled) {
+        return error.SkipZigTest;
+    }
+    if (build_options.test_video.len == 0) return error.SkipZigTest;
+
+    const encoded_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}.axia-encoded-test.mp4",
+        .{build_options.test_video},
+    );
+    defer std.testing.allocator.free(encoded_path);
+    defer deleteTestFile(encoded_path);
+    const muxed_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}.axia-muxed-test.mp4",
+        .{build_options.test_video},
+    );
+    defer std.testing.allocator.free(muxed_path);
+    defer deleteTestFile(muxed_path);
+    deleteTestFile(encoded_path);
+    deleteTestFile(muxed_path);
+
+    const width = 64;
+    const height = 48;
+    var pixels: [width * height * 4]u8 = undefined;
+    @memset(&pixels, 96);
+    var video_encoder = try encoder.Encoder.create(
+        std.testing.allocator,
+        encoded_path,
+        .{ .width = width, .height = height },
+        .{ .numerator = 1, .denominator = 30 },
+        .{ .preset = "ultrafast" },
+    );
+    var encoder_open = true;
+    defer if (encoder_open) video_encoder.deinit();
+    for (0..3) |index| {
+        try video_encoder.writeFrame(.{
+            .timing = .{
+                .index = @intCast(index),
+                .pts = @intCast(index),
+                .duration = 1,
+                .time_base = .{ .numerator = 1, .denominator = 30 },
+            },
+            .pixels = &pixels,
+            .width = width,
+            .height = height,
+            .stride = width * 4,
+        });
+    }
+    try video_encoder.finish();
+    video_encoder.deinit();
+    encoder_open = false;
+
+    const mux_result = try muxer.Muxer.run(
+        std.testing.allocator,
+        encoded_path,
+        build_options.test_video,
+        muxed_path,
+        .{},
+    );
+    if (build_options.test_video_audio_streams > 0) {
+        try std.testing.expectEqual(
+            build_options.test_video_audio_streams,
+            mux_result.audio_streams,
+        );
+    }
+    const stat = try std.fs.cwd().statFile(muxed_path);
+    try std.testing.expect(stat.size > 0);
+}
+
+test "native exporter completes the full transactional pipeline" {
+    if (!exporter.native_enabled) return error.SkipZigTest;
+    if (build_options.test_video.len == 0 or
+        build_options.test_video_frames == 0)
+    {
+        return error.SkipZigTest;
+    }
+
+    const output_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}.axia-export-test.mp4",
+        .{build_options.test_video},
+    );
+    defer std.testing.allocator.free(output_path);
+    defer deleteTestFile(output_path);
+    deleteTestFile(output_path);
+
+    const result = try exporter.Exporter.run(
+        std.testing.allocator,
+        build_options.test_video,
+        output_path,
+        .{
+            .session = .{
+                .analyzer = .{
+                    .decoder = .{ .max_analysis_dimension = 320 },
+                },
+                .crop = .{ .max_zoom = 2 },
+            },
+            .encoder = .{ .preset = "ultrafast" },
+        },
+    );
+    try std.testing.expectEqual(build_options.test_video_frames, result.frames);
+    if (build_options.test_video_audio_streams > 0) {
+        try std.testing.expectEqual(
+            build_options.test_video_audio_streams,
+            result.audio_streams,
+        );
+    }
+    const stat = try std.fs.cwd().statFile(output_path);
+    try std.testing.expect(stat.size > 0);
+}
+
 const RenderCounter = struct {
     frame_count: u64 = 0,
     checksum: u64 = 0,
@@ -895,3 +1049,11 @@ const RenderCounter = struct {
         return true;
     }
 };
+
+fn deleteTestFile(path: []const u8) void {
+    if (std.fs.path.isAbsolute(path)) {
+        std.fs.deleteFileAbsolute(path) catch {};
+    } else {
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+}

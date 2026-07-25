@@ -4,18 +4,18 @@ Desktop video-stabilization workspace for Windows and Linux, written in Zig.
 The project is evolving from a responsive UI prototype into a real automatic
 stabilization pipeline.
 
-The current product backend uses FFmpeg and libvidstab as the first functional
-two-pass exporter. It is isolated in `src/legacy` and will be removed after the
-native renderer and encoder reach feature parity.
+The default product backend still uses FFmpeg and libvidstab. It is isolated in
+`src/legacy` so it can be removed after native export has been exercised on the
+project's supported media matrix.
 
 The native engine lives in `src/engine`. It currently provides frame-exact
 FFmpeg decoding, presentation timestamps for CFR/VFR media, spatially
 distributed Shi-Tomasi features, forward/backward pyramidal Lucas-Kanade
 tracking, RANSAC similarity transforms, scene segmentation and
 confidence-weighted, timestamp-aware trajectory smoothing. It also builds a
-per-scene static or dynamic crop plan, decodes full-resolution BGRA frames and
-warps them through reusable buffers. Native video encoding and audio muxing are
-the remaining end-to-end export stages.
+per-scene static or dynamic crop plan, decodes full-resolution BGRA frames,
+warps them through reusable buffers, encodes H.264 and remuxes the source audio
+and metadata into a transactionally published MP4.
 
 ## Requirements
 
@@ -50,13 +50,13 @@ texture, keeping memory bounded regardless of the source duration.
 Enable native analysis libraries when installed in standard system locations:
 
 ```text
-zig build run -Dnative-video=true
+zig build run -Dengine=native -Dnative-video=true
 ```
 
 On Windows, custom library locations can be supplied explicitly:
 
 ```text
-zig build run -Dnative-video=true \
+zig build run -Dengine=native -Dnative-video=true \
   -Dnative-include=C:/deps/include \
   -Dnative-lib=C:/deps/lib
 ```
@@ -67,8 +67,9 @@ The same pipeline is also available without the graphical window:
 zig build cli -- input.mp4 output.mp4
 ```
 
-`-Dengine=native` is intentionally rejected until native encoding and audio
-muxing are implemented; it never falls back silently to libvidstab.
+Backend selection never falls back silently. Native export currently stream
+copies source audio tracks into MP4; inputs whose audio codec is not accepted by
+the MP4 muxer fail explicitly instead of losing audio.
 
 Run the reproducible end-to-end smoke test on Windows:
 

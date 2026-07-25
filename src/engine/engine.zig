@@ -11,6 +11,9 @@ pub const warp = @import("warp.zig");
 pub const crop = @import("crop.zig");
 pub const session = @import("session.zig");
 pub const renderer = @import("renderer.zig");
+pub const encoder = @import("encoder.zig");
+pub const muxer = @import("muxer.zig");
+pub const exporter = @import("exporter.zig");
 
 pub const Backend = enum {
     legacy,
@@ -26,15 +29,13 @@ pub const native_dependencies_enabled =
 
 pub const AvailabilityError = error{
     NativeDependenciesDisabled,
-    NativeExportNotImplemented,
 };
 
-/// Native analysis and frame rendering are available, but product selection
-/// remains blocked until encoding and audio muxing complete an export.
+/// Backend selection is explicit and never falls back silently. The native
+/// exporter requires both FFmpeg and OpenCV development dependencies.
 pub fn ensureSelectedBackendIsReady() AvailabilityError!void {
     if (selected_backend == .legacy) return;
     if (!native_dependencies_enabled) return error.NativeDependenciesDisabled;
-    return error.NativeExportNotImplemented;
 }
 
 test "engine module has a valid compile-time backend" {

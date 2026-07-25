@@ -39,7 +39,9 @@ try {
     & $ffmpeg `
         -hide_banner -loglevel error -y `
         -f lavfi -i "testsrc2=size=320x180:rate=18" `
-        -frames:v 18 -c:v libx264 -pix_fmt yuv420p `
+        -f lavfi -i "sine=frequency=880:sample_rate=48000" `
+        -frames:v 18 -shortest `
+        -c:v libx264 -pix_fmt yuv420p -c:a aac `
         $fixture
     if ($LASTEXITCODE -ne 0) {
         throw "Não foi possível gerar a fixture do Analyzer."
@@ -54,6 +56,7 @@ try {
         "-Dopencv-lib=$opencvLibrary" `
         "-Dtest-video=$fixture" `
         -Dtest-video-frames=18 `
+        -Dtest-video-audio-streams=1 `
         --summary all
     if ($LASTEXITCODE -ne 0) {
         throw "Os testes do Analyzer nativo falharam."
