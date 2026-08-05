@@ -21,6 +21,8 @@ and metadata into a transactionally published MP4.
 - OpenCV development libraries used by the small bridge in `native/`
 - The `ffmpeg` executable on `PATH` for the graphical video preview and test
   fixture generation
+- On Linux, `zenity` (GNOME and most Fedora installations) or `kdialog` (KDE)
+  for the graphical video file selector
 - Windows 10/11 or Linux with the usual X11/OpenGL development packages
 
 Raylib 5.5 is downloaded and compiled by Zig. It creates the OpenGL 3.3 window

@@ -30,8 +30,13 @@ pub fn main() !void {
     defer fonts.deinit();
     var preview = preview_player.Player.init(allocator);
     defer preview.deinit();
+    var import_selector = file_dialog.AsyncSelector.init(allocator);
+    defer import_selector.deinit();
 
     while (!rl.windowShouldClose()) {
+        if (import_selector.poll()) |selection| {
+            finishImport(allocator, &state, &preview, selection);
+        }
         preview.update(rl.getFrameTime());
         const snapshot = state.snapshot();
 
@@ -40,7 +45,7 @@ pub fn main() !void {
         rl.endDrawing();
 
         state.setParameters(result.parameters);
-        if (result.import_requested) importVideo(allocator, &state, &preview);
+        if (result.import_requested) requestImport(&import_selector, &state);
         if (result.preview_toggle_requested) {
             preview.togglePlayback() catch |err| reportPreviewError(&state, err);
         }
@@ -56,24 +61,48 @@ pub fn main() !void {
     }
 }
 
-fn importVideo(
+fn requestImport(
+    selector: *file_dialog.AsyncSelector,
+    state: *app_state.AppState,
+) void {
+    _ = selector.start() catch |err| {
+        std.log.err("file dialog thread error: {s}", .{@errorName(err)});
+        state.setMessage("Não foi possível iniciar o seletor de vídeos.");
+        return;
+    };
+}
+
+fn finishImport(
     allocator: std.mem.Allocator,
     state: *app_state.AppState,
     preview: *preview_player.Player,
+    selection: file_dialog.Selection,
 ) void {
-    const selected_path = file_dialog.selectVideo(allocator) catch |err| {
-        state.setMessage(switch (err) {
-            error.UnsupportedPlatform => "A importação por seletor ainda não está disponível neste sistema.",
-            error.DialogFailed => "O Windows não conseguiu abrir o seletor de vídeos.",
-            error.InvalidPathEncoding => "O caminho selecionado não pôde ser interpretado.",
-            error.OutOfMemory => "Não há memória suficiente para importar o vídeo.",
-        });
-        return;
-    } orelse return;
+    const selected_path = switch (selection) {
+        .selected => |path| path,
+        .cancelled => return,
+        .failed => |err| {
+            reportFileDialogError(state, err);
+            return;
+        },
+    };
     defer allocator.free(selected_path);
 
     if (!loadMedia(state, selected_path)) return;
     preview.load(selected_path) catch |err| reportPreviewError(state, err);
+}
+
+fn reportFileDialogError(
+    state: *app_state.AppState,
+    err: file_dialog.FileDialogError,
+) void {
+    state.setMessage(switch (err) {
+        error.UnsupportedPlatform => "A importação por seletor ainda não está disponível neste sistema.",
+        error.BackendUnavailable => "Instale Zenity ou KDialog para abrir o seletor de vídeos no Linux.",
+        error.DialogFailed => "O sistema não conseguiu abrir o seletor de vídeos.",
+        error.InvalidPathEncoding => "O caminho selecionado não pôde ser interpretado.",
+        error.OutOfMemory => "Não há memória suficiente para importar o vídeo.",
+    });
 }
 
 fn loadMedia(state: *app_state.AppState, input_path: []const u8) bool {

@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const app_state = @import("app_state.zig");
 const media = @import("core/media.zig");
+const file_dialog = @import("platform/file_dialog.zig");
 const engine = @import("engine/engine.zig");
 const analyzer = engine.analyzer;
 const crop = engine.crop;
@@ -16,6 +17,10 @@ const renderer = engine.renderer;
 const session = engine.session;
 const trajectory = engine.trajectory;
 const warp = engine.warp;
+
+comptime {
+    _ = file_dialog;
+}
 
 test "derives stabilized output beside source" {
     var buffer: [256]u8 = undefined;
