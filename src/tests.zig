@@ -56,12 +56,20 @@ test "processing job freezes media and parameters" {
         "C:\\videos\\take.mp4",
         "C:\\videos\\take-stabilized.mp4",
     ));
-    state.setParameters(.{ .smoothness = 65, .crop = 8 });
+    state.setParameters(.{
+        .smoothness = 65,
+        .crop = 8,
+        .export_quality = .high,
+    });
     const job = state.begin() orelse return error.TestUnexpectedResult;
     state.setParameters(.{ .smoothness = 10, .crop = 2 });
 
     try std.testing.expectEqual(@as(f32, 65), job.parameters.smoothness);
     try std.testing.expectEqual(@as(f32, 8), job.parameters.crop);
+    try std.testing.expectEqual(
+        app_state.ExportQuality.high,
+        job.parameters.export_quality,
+    );
     try std.testing.expectEqualStrings("C:\\videos\\take.mp4", job.media.input());
 
     state.updateFrameProgress(.analyzing, 0.4, 42, 100, 2.5);
@@ -69,6 +77,38 @@ test "processing job freezes media and parameters" {
     try std.testing.expectEqual(@as(u64, 42), snapshot.processed_frame);
     try std.testing.expectEqual(@as(?u64, 100), snapshot.total_frames);
     try std.testing.expectEqual(@as(f32, 2.5), snapshot.processing_speed);
+}
+
+test "export quality presets map to encoder settings" {
+    const high = app_state.ExportQuality.high.encoderProfile();
+    const balanced = app_state.ExportQuality.balanced.encoderProfile();
+    const compact = app_state.ExportQuality.compact.encoderProfile();
+
+    try std.testing.expectEqual(@as(u8, 16), high.crf);
+    try std.testing.expectEqualStrings("slow", high.preset);
+    try std.testing.expectEqual(@as(u8, 18), balanced.crf);
+    try std.testing.expectEqualStrings("medium", balanced.preset);
+    try std.testing.expectEqual(@as(u8, 24), compact.crf);
+    try std.testing.expectEqualStrings("fast", compact.preset);
+}
+
+test "muxing remains an active cancellable phase" {
+    var state = app_state.AppState{};
+    try std.testing.expect(state.setMedia(
+        "C:\\videos\\take.mp4",
+        "C:\\videos\\take-stabilized.mp4",
+    ));
+    _ = state.begin() orelse return error.TestUnexpectedResult;
+    state.update(.muxing, 0.98);
+    state.requestCancel();
+
+    const snapshot = state.snapshot();
+    try std.testing.expect(snapshot.phase.isBusy());
+    try std.testing.expect(snapshot.cancel_requested);
+    try std.testing.expectEqualStrings(
+        "Finalizando áudio e contêiner",
+        snapshot.phase.label(),
+    );
 }
 
 test "cancellation is accepted only for active processing" {
@@ -1433,7 +1473,7 @@ test "native exporter completes the full transactional pipeline" {
                 },
                 .crop = .{ .max_zoom = 2 },
             },
-            .encoder = .{ .preset = "ultrafast" },
+            .encoder = .{ .crf = 16, .preset = "slow" },
         },
     );
     try std.testing.expectEqual(build_options.test_video_frames, result.frames);

@@ -58,6 +58,7 @@ const CliProgress = struct {
     fn stageLabel(stage: engine.exporter.Stage) []const u8 {
         return switch (stage) {
             .analyzing => "análise",
+            .smoothing => "suavização",
             .rendering => "render",
             .muxing => "mux",
             .completed => "concluído",

@@ -47,6 +47,14 @@ skip controls, space-bar control and a seek bar below the image. FFmpeg streams
 at most 960x540 and 60 fps with one RGBA frame ahead into a reusable Raylib
 texture, keeping memory bounded regardless of the source duration.
 
+The graphical workspace offers three H.264 export-quality profiles: **Alta**
+prioritizes image quality, **Padrão** keeps the engine defaults and **Leve**
+trades some fidelity for a smaller, faster export. During processing, the
+timeline distinguishes analysis, trajectory smoothing, rendering and final
+muxing, and reports measured frames per second with an ETA when enough samples
+are available. The application opens maximized to match the monitor's available
+workspace and remains resizable through the native window controls.
+
 FFmpeg and OpenCV are enabled by default when installed in standard system
 locations:
 

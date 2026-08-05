@@ -173,6 +173,7 @@ const NativeDecoder = struct {
     output_dimensions: Dimensions,
     output_format: PixelFormat,
     output_pixels: []u8,
+    output_frame_size: usize,
     output_stride: usize,
     next_index: u64 = 0,
     draining: bool = false,
@@ -268,11 +269,17 @@ const NativeDecoder = struct {
             output_stride,
             @as(usize, output_dimensions.height),
         ) catch return error.InvalidVideoDimensions;
-        const output_pixels = try allocator.alloc(
-            u8,
+        // FFmpeg's optimized pixel converters may touch SIMD padding past the
+        // visible image. Keep that padding inside the allocation while exposing
+        // only the actual frame bytes through FrameView.
+        const output_allocation_size = std.math.add(
+            usize,
             output_size,
-        );
+            @as(usize, ffmpeg.AV_INPUT_BUFFER_PADDING_SIZE),
+        ) catch return error.InvalidVideoDimensions;
+        const output_pixels = try allocator.alloc(u8, output_allocation_size);
         errdefer allocator.free(output_pixels);
+        @memset(output_pixels[output_size..], 0);
 
         const frame = ffmpeg.av_frame_alloc() orelse
             return error.AllocationFailed;
@@ -345,6 +352,7 @@ const NativeDecoder = struct {
             .output_dimensions = output_dimensions,
             .output_format = options.output_format,
             .output_pixels = output_pixels,
+            .output_frame_size = output_size,
             .output_stride = output_stride,
         };
     }
@@ -478,10 +486,18 @@ const NativeDecoder = struct {
         var destination_stride = [_]c_int{
             @intCast(self.output_stride), 0, 0, 0, 0, 0, 0, 0,
         };
+        var source_data: [8][*c]const u8 = .{
+            null, null, null, null, null, null, null, null,
+        };
+        var source_stride: [8]c_int = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+        for (0..source_data.len) |plane| {
+            source_data[plane] = self.frame.data[plane];
+            source_stride[plane] = self.frame.linesize[plane];
+        }
         const converted_rows = ffmpeg.sws_scale(
             cached_context,
-            &self.frame.data,
-            &self.frame.linesize,
+            &source_data,
+            &source_stride,
             0,
             self.frame.height,
             &destination_data,
@@ -506,7 +522,7 @@ const NativeDecoder = struct {
 
         return .{
             .timing = timing,
-            .pixels = self.output_pixels,
+            .pixels = self.output_pixels[0..self.output_frame_size],
             .width = self.output_dimensions.width,
             .height = self.output_dimensions.height,
             .stride = self.output_stride,

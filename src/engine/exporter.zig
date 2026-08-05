@@ -10,6 +10,7 @@ pub const native_enabled =
 
 pub const Stage = enum {
     analyzing,
+    smoothing,
     rendering,
     muxing,
     completed,
@@ -202,7 +203,10 @@ const AnalysisObserver = struct {
         const self: *AnalysisObserver =
             @ptrCast(@alignCast(raw_context.?));
         self.observer.report(.{
-            .stage = .analyzing,
+            .stage = switch (progress.stage) {
+                .analyzing => .analyzing,
+                .smoothing => .smoothing,
+            },
             .processed_frames = progress.decoded_frames,
             .total_frames = progress.estimated_frames,
         });

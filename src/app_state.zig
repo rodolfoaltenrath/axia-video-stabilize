@@ -6,6 +6,7 @@ pub const Phase = enum {
     analyzing,
     smoothing,
     rendering,
+    muxing,
     completed,
     failed,
     cancelled,
@@ -17,6 +18,7 @@ pub const Phase = enum {
             .analyzing => "Analisando movimento",
             .smoothing => "Suavizando trajetória",
             .rendering => "Renderizando vídeo",
+            .muxing => "Finalizando áudio e contêiner",
             .completed => "Exportação concluída",
             .failed => "Falha no processamento",
             .cancelled => "Operação cancelada",
@@ -25,7 +27,7 @@ pub const Phase = enum {
 
     pub fn isBusy(self: Phase) bool {
         return switch (self) {
-            .loading, .analyzing, .smoothing, .rendering => true,
+            .loading, .analyzing, .smoothing, .rendering, .muxing => true,
             else => false,
         };
     }
@@ -36,11 +38,31 @@ pub const StabilizationMode = enum {
     distortion,
 };
 
+pub const ExportQuality = enum {
+    high,
+    balanced,
+    compact,
+
+    pub const EncoderProfile = struct {
+        crf: u8,
+        preset: []const u8,
+    };
+
+    pub fn encoderProfile(self: ExportQuality) EncoderProfile {
+        return switch (self) {
+            .high => .{ .crf = 16, .preset = "slow" },
+            .balanced => .{ .crf = 18, .preset = "medium" },
+            .compact => .{ .crf = 24, .preset = "fast" },
+        };
+    }
+};
+
 pub const Parameters = struct {
     smoothness: f32 = 72.0,
     crop: f32 = 12.0,
     dynamic_crop: bool = true,
     mode: StabilizationMode = .motion,
+    export_quality: ExportQuality = .balanced,
 };
 
 pub const max_path_bytes = 2048;

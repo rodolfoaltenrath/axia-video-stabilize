@@ -100,6 +100,7 @@ pub const ThreadPool = struct {
             std.math.clamp(config.parameters.smoothness, 0.0, 100.0) / 100.0;
         const crop_fraction =
             std.math.clamp(config.parameters.crop, 0.0, 30.0) / 100.0;
+        const encoder_profile = config.parameters.export_quality.encoderProfile();
         _ = try engine.exporter.Exporter.run(
             self.allocator,
             config.media.input(),
@@ -114,6 +115,10 @@ pub const ThreadPool = struct {
                             .static,
                         .extra_crop_fraction = crop_fraction,
                     },
+                },
+                .encoder = .{
+                    .crf = encoder_profile.crf,
+                    .preset = encoder_profile.preset,
                 },
                 .observer = .{
                     .context = &progress,
@@ -140,40 +145,101 @@ fn messageForError(err: anyerror) []const u8 {
 
 const NativeProgress = struct {
     state: *state_mod.AppState,
+    stage: ?engine.exporter.Stage = null,
+    last_sample_ns: i128 = 0,
+    last_sample_frames: u64 = 0,
+    processing_speed: f64 = 0,
 
     fn onProgress(
         raw_context: ?*anyopaque,
         progress: engine.exporter.Progress,
     ) void {
         const self: *NativeProgress = @ptrCast(@alignCast(raw_context.?));
-        const total = progress.total_frames orelse
-            @max(progress.processed_frames, 1);
+        const total = @max(
+            progress.total_frames orelse 0,
+            @max(progress.processed_frames, 1),
+        );
         const ratio: f32 =
             @floatCast(@as(f64, @floatFromInt(progress.processed_frames)) /
             @as(f64, @floatFromInt(total)));
         const phase: state_mod.Phase = switch (progress.stage) {
             .analyzing => .analyzing,
-            .rendering, .muxing, .completed => .rendering,
+            .smoothing => .smoothing,
+            .rendering => .rendering,
+            .muxing => .muxing,
+            .completed => .completed,
         };
         const start: f32 = switch (progress.stage) {
             .analyzing => 0.04,
+            .smoothing => 0.68,
             .rendering => 0.70,
             .muxing => 0.96,
             .completed => 1.0,
         };
         const end: f32 = switch (progress.stage) {
             .analyzing => 0.67,
+            .smoothing => 0.69,
             .rendering => 0.94,
             .muxing => 0.99,
             .completed => 1.0,
         };
+        const speed = self.measureSpeed(progress);
         self.state.updateFrameProgress(
             phase,
             start + (end - start) * std.math.clamp(ratio, 0.0, 1.0),
             progress.processed_frames,
             total,
-            0,
+            speed,
         );
+    }
+
+    fn measureSpeed(
+        self: *NativeProgress,
+        progress: engine.exporter.Progress,
+    ) f64 {
+        const measures_frames = switch (progress.stage) {
+            .analyzing, .rendering => true,
+            .smoothing, .muxing, .completed => false,
+        };
+        if (!measures_frames) {
+            self.stage = progress.stage;
+            self.last_sample_ns = 0;
+            self.last_sample_frames = progress.processed_frames;
+            self.processing_speed = 0;
+            return 0;
+        }
+
+        const now = std.time.nanoTimestamp();
+        if (self.stage == null or self.stage.? != progress.stage or
+            self.last_sample_ns == 0)
+        {
+            self.stage = progress.stage;
+            self.last_sample_ns = now;
+            self.last_sample_frames = progress.processed_frames;
+            self.processing_speed = 0;
+            return 0;
+        }
+
+        const elapsed_ns = now - self.last_sample_ns;
+        if (elapsed_ns < 250 * std.time.ns_per_ms or
+            progress.processed_frames < self.last_sample_frames)
+        {
+            return self.processing_speed;
+        }
+
+        const elapsed_seconds = @as(f64, @floatFromInt(elapsed_ns)) /
+            @as(f64, std.time.ns_per_s);
+        const frame_delta = progress.processed_frames -
+            self.last_sample_frames;
+        const sample = @as(f64, @floatFromInt(frame_delta)) /
+            elapsed_seconds;
+        self.processing_speed = if (self.processing_speed == 0)
+            sample
+        else
+            self.processing_speed * 0.75 + sample * 0.25;
+        self.last_sample_ns = now;
+        self.last_sample_frames = progress.processed_frames;
+        return self.processing_speed;
     }
 
     fn shouldCancel(raw_context: ?*anyopaque) bool {

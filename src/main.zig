@@ -20,10 +20,16 @@ pub fn main() !void {
     const workers = try thread_pool.ThreadPool.create(allocator, &state);
     defer workers.destroy();
 
-    rl.setConfigFlags(.{ .window_resizable = true, .msaa_4x_hint = true, .vsync_hint = true });
-    rl.initWindow(1360, 820, "Axia - Estabilização de Vídeo");
+    rl.setConfigFlags(.{
+        .window_resizable = true,
+        .window_maximized = true,
+        .msaa_4x_hint = true,
+        .vsync_hint = true,
+    });
+    rl.initWindow(1280, 720, "Axia - Estabilização de Vídeo");
     defer rl.closeWindow();
     rl.setWindowMinSize(960, 640);
+    if (!rl.isWindowMaximized()) rl.maximizeWindow();
     rl.setTargetFPS(60);
 
     try fonts.init();

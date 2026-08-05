@@ -8,7 +8,13 @@ const warp = @import("warp.zig");
 
 pub const native_enabled = analyzer_mod.native_enabled;
 
+pub const Stage = enum {
+    analyzing,
+    smoothing,
+};
+
 pub const Progress = struct {
+    stage: Stage = .analyzing,
     decoded_frames: u64,
     estimated_frames: ?u64,
 };
@@ -131,11 +137,18 @@ const NativeSession = struct {
             if (options.observer.isCancelled()) return error.Cancelled;
             try records.append(record);
             options.observer.report(.{
+                .stage = .analyzing,
                 .decoded_frames = @intCast(records.items.len),
                 .estimated_frames = video_info.estimated_frame_count,
             });
         }
         if (options.observer.isCancelled()) return error.Cancelled;
+
+        options.observer.report(.{
+            .stage = .smoothing,
+            .decoded_frames = @intCast(records.items.len),
+            .estimated_frames = @intCast(records.items.len),
+        });
 
         const owned_records = try records.toOwnedSlice();
         errdefer allocator.free(owned_records);

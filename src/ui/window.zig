@@ -173,19 +173,42 @@ fn drawParameters(panel: rl.Rectangle, snapshot: state_mod.Snapshot) UiResult {
     if (components.button(left, "MOVIMENTO", if (result.parameters.mode == .motion) .primary else .secondary, true)) result.parameters.mode = .motion;
     if (components.button(right, "DISTORÇÃO", if (result.parameters.mode == .distortion) .primary else .secondary, false)) result.parameters.mode = .distortion;
 
-    _ = components.slider(.{ .x = x, .y = panel.y + 192, .width = content_w, .height = 50 }, "Suavidade", &result.parameters.smoothness, 0, 100, "%");
-    _ = components.slider(.{ .x = x, .y = panel.y + 260, .width = content_w, .height = 50 }, "Margem de crop", &result.parameters.crop, 0, 30, "%");
-    _ = components.toggle(x, panel.y + 332, "Crop dinâmico", &result.parameters.dynamic_crop);
+    _ = components.slider(.{ .x = x, .y = panel.y + 176, .width = content_w, .height = 50 }, "Suavidade", &result.parameters.smoothness, 0, 100, "%");
+    _ = components.slider(.{ .x = x, .y = panel.y + 236, .width = content_w, .height = 50 }, "Margem de crop", &result.parameters.crop, 0, 30, "%");
+    _ = components.toggle(x, panel.y + 304, "Crop dinâmico", &result.parameters.dynamic_crop);
 
-    const note = rl.Rectangle{ .x = x, .y = panel.y + 372, .width = content_w, .height = 68 };
+    components.text("QUALIDADE", x, panel.y + 342, 12, theme.text_muted);
+    const quality_gap: f32 = 5;
+    const quality_width = (content_w - quality_gap * 2) / 3;
+    const quality_y = panel.y + 362;
+    if (components.button(
+        .{ .x = x, .y = quality_y, .width = quality_width, .height = 34 },
+        "ALTA",
+        if (result.parameters.export_quality == .high) .primary else .secondary,
+        true,
+    )) result.parameters.export_quality = .high;
+    if (components.button(
+        .{ .x = x + quality_width + quality_gap, .y = quality_y, .width = quality_width, .height = 34 },
+        "PADRÃO",
+        if (result.parameters.export_quality == .balanced) .primary else .secondary,
+        true,
+    )) result.parameters.export_quality = .balanced;
+    if (components.button(
+        .{ .x = x + (quality_width + quality_gap) * 2, .y = quality_y, .width = quality_width, .height = 34 },
+        "LEVE",
+        if (result.parameters.export_quality == .compact) .primary else .secondary,
+        true,
+    )) result.parameters.export_quality = .compact;
+
+    const note = rl.Rectangle{ .x = x, .y = panel.y + 410, .width = content_w, .height = 56 };
     rl.drawRectangleRounded(note, 0.12, 8, theme.surface_alt);
-    components.textStrong("PIPELINE REAL EM 2 PASSOS", note.x + 12, note.y + 11, 11, theme.accent);
+    components.textStrong("PIPELINE REAL EM 2 PASSOS", note.x + 12, note.y + 9, 11, theme.accent);
     if (snapshot.media.hasInput()) {
-        components.text("Movimento estimado pela engine Zig.", note.x + 12, note.y + 31, 12, theme.text_muted);
-        components.text("Saída MP4 ao lado do original.", note.x + 12, note.y + 47, 12, theme.text_muted);
+        components.text("Movimento estimado pela engine Zig.", note.x + 12, note.y + 28, 12, theme.text_muted);
+        components.text("Saída MP4 ao lado do original.", note.x + 12, note.y + 43, 12, theme.text_muted);
     } else {
-        components.text("Clique em Importar vídeo.", note.x + 12, note.y + 31, 12, theme.text_muted);
-        components.text("MP4, MOV, MKV, AVI, WebM, MTS.", note.x + 12, note.y + 47, 12, theme.text_muted);
+        components.text("Clique em Importar vídeo.", note.x + 12, note.y + 28, 12, theme.text_muted);
+        components.text("MP4, MOV, MKV, AVI, WebM, MTS.", note.x + 12, note.y + 43, 12, theme.text_muted);
     }
 
     const busy = snapshot.phase.isBusy();
@@ -440,6 +463,18 @@ fn drawTimeline(
         ) catch "--";
         components.text(percent, area.x + area.width - 58, area.y + 133, 14, theme.text);
         components.text(snapshot.status(), area.x + 18, area.y + 153, 12, theme.text_muted);
+        var metrics_buffer: [96]u8 = undefined;
+        const metrics = formatProcessingMetrics(&metrics_buffer, snapshot);
+        if (metrics.len > 0) {
+            const metrics_size = fonts.measure(metrics, 12, .regular);
+            components.text(
+                metrics,
+                area.x + area.width - metrics_size.x - 18,
+                area.y + 153,
+                12,
+                theme.text,
+            );
+        }
     } else {
         components.text(
             if (snapshot.media.hasInput()) "1 faixa de vídeo" else "Importe uma mídia para começar.",
@@ -449,6 +484,35 @@ fn drawTimeline(
             theme.text_muted,
         );
     }
+}
+
+fn formatProcessingMetrics(
+    buffer: *[96]u8,
+    snapshot: state_mod.Snapshot,
+) [:0]const u8 {
+    const total = snapshot.total_frames orelse return "";
+    if (snapshot.processing_speed <= 0 or snapshot.processed_frame >= total) {
+        return std.fmt.bufPrintZ(
+            buffer,
+            "{d}/{d} frames",
+            .{ snapshot.processed_frame, total },
+        ) catch "";
+    }
+
+    const remaining_frames = total - snapshot.processed_frame;
+    const remaining_seconds: u64 = @intFromFloat(@ceil(
+        @as(f64, @floatFromInt(remaining_frames)) /
+            @as(f64, snapshot.processing_speed),
+    ));
+    return std.fmt.bufPrintZ(
+        buffer,
+        "{d:.1} fps | ETA {d:0>2}:{d:0>2}",
+        .{
+            snapshot.processing_speed,
+            remaining_seconds / 60,
+            remaining_seconds % 60,
+        },
+    ) catch "";
 }
 
 fn formatPlayerTime(buffer: *[40]u8, position: f64, duration: f64) [:0]const u8 {
