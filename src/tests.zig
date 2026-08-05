@@ -313,6 +313,82 @@ test "crop constraint attenuates an unsafe correction" {
     try std.testing.expect(requirement.zoom <= options.max_zoom);
 }
 
+test "crop constraint changes stabilization strength gradually" {
+    const original = [_]trajectory.Correction{
+        .{ .x = 40 },
+        .{ .x = 40 },
+        .{ .x = 160 },
+        .{ .x = 40 },
+        .{ .x = 40 },
+    };
+    var constrained = original;
+    const poses = [_]trajectory.Pose{
+        .{ .timestamp_seconds = 0.0 },
+        .{ .timestamp_seconds = 0.1 },
+        .{ .timestamp_seconds = 0.2 },
+        .{ .timestamp_seconds = 0.3 },
+        .{ .timestamp_seconds = 0.4 },
+    };
+    const options = crop.Options{
+        .max_zoom = 1.5,
+        .correction_strength_rate_per_second = 2,
+        .search_iterations = 48,
+    };
+    try crop.constrainCorrections(
+        std.testing.allocator,
+        &constrained,
+        &poses,
+        320,
+        180,
+        options,
+    );
+
+    var previous_strength = constrained[0].x / original[0].x;
+    for (constrained[1..], original[1..]) |adjusted, input| {
+        const strength = adjusted.x / input.x;
+        try std.testing.expect(@abs(strength - previous_strength) <= 0.200001);
+        previous_strength = strength;
+        const requirement = try crop.requiredZoom(
+            adjusted,
+            320,
+            180,
+            options,
+        );
+        try std.testing.expect(!requirement.limited);
+    }
+    try std.testing.expect(constrained[1].x < original[1].x);
+    try std.testing.expect(constrained[3].x < original[3].x);
+}
+
+test "crop constraint does not smooth across scene cuts" {
+    const original = [_]trajectory.Correction{
+        .{ .x = 40 },
+        .{ .x = 40 },
+        .{ .x = 160 },
+    };
+    var constrained = original;
+    const poses = [_]trajectory.Pose{
+        .{ .timestamp_seconds = 0.0, .segment = 0 },
+        .{ .timestamp_seconds = 0.1, .segment = 0 },
+        .{ .timestamp_seconds = 0.2, .segment = 1 },
+    };
+    try crop.constrainCorrections(
+        std.testing.allocator,
+        &constrained,
+        &poses,
+        320,
+        180,
+        .{ .max_zoom = 1.5, .search_iterations = 48 },
+    );
+
+    try std.testing.expectApproxEqAbs(
+        original[1].x,
+        constrained[1].x,
+        0.000001,
+    );
+    try std.testing.expect(constrained[2].x < original[2].x);
+}
+
 test "dynamic crop anticipates motion without crossing scenes" {
     const corrections = [_]trajectory.Correction{
         .{},

@@ -213,6 +213,22 @@ fn mapStatus(status: c_int) DetectionError {
     return switch (status) {
         cv.AXIA_CV_INVALID_ARGUMENT => error.InvalidOptions,
         cv.AXIA_CV_OUTPUT_TOO_SMALL => error.OutputTooSmall,
-        else => error.OpenCvFailure,
+        else => blk: {
+            logOpenCvError("detectando cantos Shi-Tomasi", status);
+            break :blk error.OpenCvFailure;
+        },
     };
+}
+
+fn logOpenCvError(operation: []const u8, status: c_int) void {
+    const raw_message = cv.axia_cv_last_error();
+    if (raw_message != null and raw_message[0] != 0) {
+        std.log.err("OpenCV: {s}: {s} ({d})", .{
+            operation,
+            std.mem.span(raw_message),
+            status,
+        });
+    } else {
+        std.log.err("OpenCV: {s}: código {d}", .{ operation, status });
+    }
 }

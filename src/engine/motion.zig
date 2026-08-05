@@ -167,7 +167,9 @@ pub const Estimator = struct {
             self.status.ptr,
             self.current_points.len,
         );
-        if (flow_status != cv.AXIA_CV_OK) return mapStatus(flow_status);
+        if (flow_status != cv.AXIA_CV_OK) {
+            return mapStatus("calculando o fluxo óptico", flow_status);
+        }
 
         const tracked_count = self.filterTracks(
             detected,
@@ -196,7 +198,10 @@ pub const Estimator = struct {
             &inlier_count,
         );
         if (estimation_status != cv.AXIA_CV_OK) {
-            return mapStatus(estimation_status);
+            return mapStatus(
+                "estimando o movimento global",
+                estimation_status,
+            );
         }
 
         const result_transform = types.SimilarityTransform{
@@ -345,11 +350,27 @@ fn isFinitePoint(point: features.Point) bool {
     return std.math.isFinite(point.x) and std.math.isFinite(point.y);
 }
 
-fn mapStatus(status: c_int) MotionError {
+fn mapStatus(operation: []const u8, status: c_int) MotionError {
     return switch (status) {
         cv.AXIA_CV_INVALID_ARGUMENT => error.InvalidOptions,
         cv.AXIA_CV_OUTPUT_TOO_SMALL => error.OutputTooSmall,
         cv.AXIA_CV_ESTIMATION_FAILED => error.EstimationFailed,
-        else => error.OpenCvFailure,
+        else => blk: {
+            logOpenCvError(operation, status);
+            break :blk error.OpenCvFailure;
+        },
     };
+}
+
+fn logOpenCvError(operation: []const u8, status: c_int) void {
+    const raw_message = cv.axia_cv_last_error();
+    if (raw_message != null and raw_message[0] != 0) {
+        std.log.err("OpenCV: {s}: {s} ({d})", .{
+            operation,
+            std.mem.span(raw_message),
+            status,
+        });
+    } else {
+        std.log.err("OpenCV: {s}: código {d}", .{ operation, status });
+    }
 }

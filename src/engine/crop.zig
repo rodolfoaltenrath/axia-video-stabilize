@@ -12,6 +12,7 @@ pub const Options = struct {
     max_zoom: f64 = 1.5,
     extra_crop_fraction: f64 = 0,
     dynamic_window_seconds: f64 = 0.5,
+    correction_strength_rate_per_second: f64 = 2.0,
     edge_margin_pixels: f64 = 0,
     search_iterations: u8 = 40,
 };
@@ -161,6 +162,80 @@ pub fn constrainCorrection(
     options: Options,
 ) CropError!trajectory.Correction {
     try validateOptions(width, height, options);
+    return scaleCorrection(
+        correction,
+        try safeCorrectionStrength(
+            correction,
+            width,
+            height,
+            options,
+        ),
+    );
+}
+
+/// Constrains a sequence without introducing abrupt per-frame changes in
+/// stabilization strength. The backward pass anticipates a future limit and
+/// the forward pass eases out of it; neither crosses a scene boundary or ever
+/// exceeds the safe strength calculated for an individual frame.
+pub fn constrainCorrections(
+    allocator: std.mem.Allocator,
+    corrections: []trajectory.Correction,
+    poses: []const trajectory.Pose,
+    width: u32,
+    height: u32,
+    options: Options,
+) CropError!void {
+    try validateOptions(width, height, options);
+    if (corrections.len != poses.len) return error.LengthMismatch;
+    if (corrections.len == 0) return;
+
+    const strengths = try allocator.alloc(f64, corrections.len);
+    defer allocator.free(strengths);
+    for (corrections, poses, strengths, 0..) |correction, pose, *strength, index| {
+        try validatePoseOrder(poses, index, pose);
+        strength.* = try safeCorrectionStrength(
+            correction,
+            width,
+            height,
+            options,
+        );
+    }
+
+    var index = corrections.len - 1;
+    while (index > 0) : (index -= 1) {
+        const previous = index - 1;
+        if (poses[previous].segment != poses[index].segment) continue;
+        const elapsed = poses[index].timestamp_seconds -
+            poses[previous].timestamp_seconds;
+        strengths[previous] = @min(
+            strengths[previous],
+            strengths[index] +
+                options.correction_strength_rate_per_second * elapsed,
+        );
+    }
+    for (1..corrections.len) |current| {
+        const previous = current - 1;
+        if (poses[previous].segment != poses[current].segment) continue;
+        const elapsed = poses[current].timestamp_seconds -
+            poses[previous].timestamp_seconds;
+        strengths[current] = @min(
+            strengths[current],
+            strengths[previous] +
+                options.correction_strength_rate_per_second * elapsed,
+        );
+    }
+
+    for (corrections, strengths) |*correction, strength| {
+        correction.* = scaleCorrection(correction.*, strength);
+    }
+}
+
+fn safeCorrectionStrength(
+    correction: trajectory.Correction,
+    width: u32,
+    height: u32,
+    options: Options,
+) CropError!f64 {
     if (try isSafe(
         correction,
         options.max_zoom,
@@ -168,7 +243,7 @@ pub fn constrainCorrection(
         height,
         options.edge_margin_pixels,
     )) {
-        return correction;
+        return 1;
     }
 
     var lower: f64 = 0;
@@ -188,7 +263,7 @@ pub fn constrainCorrection(
             upper = candidate;
         }
     }
-    return scaleCorrection(correction, lower);
+    return lower;
 }
 
 fn scaleCorrection(
@@ -324,11 +399,34 @@ fn validateOptions(
         options.extra_crop_fraction > 0.5 or
         !std.math.isFinite(options.dynamic_window_seconds) or
         options.dynamic_window_seconds < 0 or
+        !std.math.isFinite(options.correction_strength_rate_per_second) or
+        options.correction_strength_rate_per_second <= 0 or
         !std.math.isFinite(options.edge_margin_pixels) or
         options.edge_margin_pixels < 0 or
         options.edge_margin_pixels >= maximum_margin or
         options.search_iterations == 0)
     {
         return error.InvalidOptions;
+    }
+}
+
+fn validatePoseOrder(
+    poses: []const trajectory.Pose,
+    index: usize,
+    pose: trajectory.Pose,
+) CropError!void {
+    if (!std.math.isFinite(pose.timestamp_seconds)) {
+        return error.InvalidTimestamp;
+    }
+    if (index == 0) return;
+
+    const previous = poses[index - 1];
+    if (pose.segment < previous.segment) {
+        return error.InvalidSegmentOrder;
+    }
+    if (pose.segment == previous.segment and
+        pose.timestamp_seconds < previous.timestamp_seconds)
+    {
+        return error.InvalidTimestamp;
     }
 }
