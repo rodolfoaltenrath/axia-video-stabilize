@@ -157,6 +157,7 @@ const NativeAnalyzer = struct {
                 .tracked_points = estimate.tracked_points,
                 .inlier_points = estimate.inlier_points,
                 .residual_px = estimate.residual_px,
+                .spatial_coverage = estimate.spatial_coverage,
                 .scene_id = self.scene_id,
                 .flags = .{
                     .low_confidence = estimate.confidence <

@@ -31,6 +31,10 @@ pub const Options = struct {
     optical_flow: OpticalFlowOptions = .{},
     ransac: RansacOptions = .{},
     minimum_tracks: u16 = 12,
+    maximum_translation_fraction: f64 = 0.35,
+    maximum_rotation_radians: f64 = std.math.pi / 6.0,
+    minimum_scale: f64 = 0.67,
+    maximum_scale: f64 = 1.5,
 };
 
 pub const GrayFrame = struct {
@@ -47,6 +51,7 @@ pub const Estimate = struct {
     tracked_points: u32,
     inlier_points: u32,
     residual_px: f32,
+    spatial_coverage: f32,
 };
 
 pub const MotionError = error{
@@ -212,6 +217,14 @@ pub const Estimator = struct {
         };
         result_transform.validate() catch return error.EstimationFailed;
         if (inlier_count < 3) return error.EstimationFailed;
+        if (!transformIsPlausible(
+            result_transform,
+            previous.width,
+            previous.height,
+            self.options,
+        )) {
+            return error.EstimationFailed;
+        }
 
         const residual = self.calculateResidual(
             result_transform,
@@ -223,8 +236,15 @@ pub const Estimator = struct {
         const inlier_ratio = @as(f64, @floatFromInt(inlier_count)) /
             @as(f64, @floatFromInt(tracked_count));
         const residual_score = @exp(-@as(f64, residual) / 3.0);
+        const spatial_coverage = calculateSpatialCoverage(
+            self.previous_points[0..tracked_count],
+            self.inlier_mask[0..tracked_count],
+            previous.width,
+            previous.height,
+        );
         const confidence: f32 = @floatCast(std.math.clamp(
-            inlier_ratio * @sqrt(retention) * residual_score,
+            inlier_ratio * @sqrt(retention) * residual_score *
+                spatial_coverage,
             0.0,
             1.0,
         ));
@@ -236,6 +256,7 @@ pub const Estimator = struct {
             .tracked_points = @intCast(tracked_count),
             .inlier_points = @intCast(inlier_count),
             .residual_px = residual,
+            .spatial_coverage = @floatCast(spatial_coverage),
         };
     }
 
@@ -329,10 +350,84 @@ fn validateOptions(options: Options) MotionError!void {
         options.ransac.max_iterations == 0 or
         !std.math.isFinite(options.ransac.confidence) or
         options.ransac.confidence <= 0 or
-        options.ransac.confidence >= 1)
+        options.ransac.confidence >= 1 or
+        !std.math.isFinite(options.maximum_translation_fraction) or
+        options.maximum_translation_fraction <= 0 or
+        !std.math.isFinite(options.maximum_rotation_radians) or
+        options.maximum_rotation_radians <= 0 or
+        options.maximum_rotation_radians > std.math.pi or
+        !std.math.isFinite(options.minimum_scale) or
+        options.minimum_scale <= 0 or
+        !std.math.isFinite(options.maximum_scale) or
+        options.maximum_scale < options.minimum_scale)
     {
         return error.InvalidOptions;
     }
+}
+
+fn transformIsPlausible(
+    transform: types.SimilarityTransform,
+    width: u32,
+    height: u32,
+    options: Options,
+) bool {
+    const width_f: f64 = @floatFromInt(width);
+    const height_f: f64 = @floatFromInt(height);
+    const diagonal = @sqrt(width_f * width_f + height_f * height_f);
+    const translation = @sqrt(
+        transform.x * transform.x + transform.y * transform.y,
+    );
+    return translation <= options.maximum_translation_fraction * diagonal and
+        @abs(transform.angle) <= options.maximum_rotation_radians and
+        transform.scale >= options.minimum_scale and
+        transform.scale <= options.maximum_scale;
+}
+
+/// Measures how broadly the RANSAC inliers support the global transform. A
+/// foreground object occupying a small region receives a low score even when
+/// all of its local tracks agree perfectly.
+fn calculateSpatialCoverage(
+    points: []const features.Point,
+    inlier_mask: []const u8,
+    width: u32,
+    height: u32,
+) f64 {
+    if (points.len != inlier_mask.len or points.len == 0 or
+        width == 0 or height == 0)
+    {
+        return 0;
+    }
+
+    var minimum_x = std.math.inf(f64);
+    var minimum_y = std.math.inf(f64);
+    var maximum_x = -std.math.inf(f64);
+    var maximum_y = -std.math.inf(f64);
+    var count: usize = 0;
+    for (points, inlier_mask) |point, is_inlier| {
+        if (is_inlier == 0 or !isFinitePoint(point)) continue;
+        const x: f64 = @floatCast(point.x);
+        const y: f64 = @floatCast(point.y);
+        minimum_x = @min(minimum_x, x);
+        minimum_y = @min(minimum_y, y);
+        maximum_x = @max(maximum_x, x);
+        maximum_y = @max(maximum_y, y);
+        count += 1;
+    }
+    if (count < 3) return 0;
+
+    const usable_width = @as(f64, @floatFromInt(@max(width - 1, 1)));
+    const usable_height = @as(f64, @floatFromInt(@max(height - 1, 1)));
+    const horizontal = std.math.clamp(
+        (maximum_x - minimum_x) / usable_width,
+        0,
+        1,
+    );
+    const vertical = std.math.clamp(
+        (maximum_y - minimum_y) / usable_height,
+        0,
+        1,
+    );
+    return @sqrt(horizontal * vertical);
 }
 
 fn validateFrame(frame: GrayFrame) MotionError!void {
@@ -373,4 +468,70 @@ fn logOpenCvError(operation: []const u8, status: c_int) void {
     } else {
         std.log.err("OpenCV: {s}: código {d}", .{ operation, status });
     }
+}
+
+test "spatial coverage rewards inliers spread across the frame" {
+    const spread = [_]features.Point{
+        .{ .x = 5, .y = 5 },
+        .{ .x = 95, .y = 5 },
+        .{ .x = 5, .y = 95 },
+        .{ .x = 95, .y = 95 },
+    };
+    const clustered = [_]features.Point{
+        .{ .x = 45, .y = 45 },
+        .{ .x = 50, .y = 45 },
+        .{ .x = 45, .y = 50 },
+        .{ .x = 50, .y = 50 },
+    };
+    const inliers = [_]u8{1} ** 4;
+
+    const spread_score = calculateSpatialCoverage(
+        &spread,
+        &inliers,
+        101,
+        101,
+    );
+    const clustered_score = calculateSpatialCoverage(
+        &clustered,
+        &inliers,
+        101,
+        101,
+    );
+    try std.testing.expect(spread_score > 0.85);
+    try std.testing.expect(clustered_score < 0.1);
+}
+
+test "motion plausibility rejects degenerate frame transforms" {
+    const options = Options{};
+    try std.testing.expect(transformIsPlausible(
+        .{ .x = 4, .y = -3, .angle = 0.02, .scale = 1.01 },
+        1920,
+        1080,
+        options,
+    ));
+    try std.testing.expect(!transformIsPlausible(
+        .{ .x = 900 },
+        1920,
+        1080,
+        options,
+    ));
+    try std.testing.expect(!transformIsPlausible(
+        .{ .angle = std.math.pi / 2.0 },
+        1920,
+        1080,
+        options,
+    ));
+    try std.testing.expect(!transformIsPlausible(
+        .{ .scale = 2 },
+        1920,
+        1080,
+        options,
+    ));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .maximum_scale = std.math.inf(f64),
+    }));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .minimum_scale = 1.1,
+        .maximum_scale = 1.0,
+    }));
 }

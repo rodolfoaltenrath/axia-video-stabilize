@@ -5,6 +5,7 @@ pub const ValidationError = error{
     InvalidFrameDuration,
     InvalidTransform,
     InvalidConfidence,
+    InvalidSpatialCoverage,
     InvalidPointCount,
     InvalidResidual,
     UnexpectedFrameIndex,
@@ -103,6 +104,7 @@ pub const AnalysisRecord = struct {
     tracked_points: u32 = 0,
     inlier_points: u32 = 0,
     residual_px: f32 = 0,
+    spatial_coverage: f32 = 0,
     scene_id: u32 = 0,
     flags: AnalysisFlags = .{},
 
@@ -131,6 +133,12 @@ pub const AnalysisRecord = struct {
         }
         if (!std.math.isFinite(self.residual_px) or self.residual_px < 0) {
             return error.InvalidResidual;
+        }
+        if (!std.math.isFinite(self.spatial_coverage) or
+            self.spatial_coverage < 0 or
+            self.spatial_coverage > 1)
+        {
+            return error.InvalidSpatialCoverage;
         }
     }
 };

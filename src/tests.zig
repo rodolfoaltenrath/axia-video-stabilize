@@ -594,6 +594,10 @@ test "analysis record rejects invalid transform and point counts" {
         .tracked_points = 4,
         .inlier_points = 5,
     }).validate());
+    try std.testing.expectError(error.InvalidSpatialCoverage, (engine_types.AnalysisRecord{
+        .timing = timing,
+        .spatial_coverage = 1.1,
+    }).validate());
 }
 
 test "analysis dimensions preserve aspect ratio without upscaling" {
@@ -784,6 +788,77 @@ test "native motion estimator recovers a synthetic translation" {
         0.01,
     );
     try std.testing.expect(estimate.inlier_points >= 12);
+    try std.testing.expect(estimate.spatial_coverage > 0.5);
+}
+
+test "native motion estimator distrusts motion confined to a small region" {
+    if (!motion.native_enabled) return error.SkipZigTest;
+
+    const width = 160;
+    const height = 120;
+    var previous = [_]u8{0} ** (width * height);
+    var current = [_]u8{0} ** (width * height);
+    const origin_x = 62;
+    const origin_y = 42;
+    const shift_x = 3;
+    const shift_y = 2;
+    for (0..5) |row| {
+        for (0..5) |column| {
+            const left = origin_x + column * 7;
+            const top = origin_y + row * 7;
+            for (0..4) |square_y| {
+                @memset(
+                    previous[(top + square_y) * width + left .. (top + square_y) * width + left + 4],
+                    255,
+                );
+                @memset(
+                    current[(top + shift_y + square_y) * width +
+                        left + shift_x .. (top + shift_y + square_y) * width +
+                        left + shift_x + 4],
+                    255,
+                );
+            }
+        }
+    }
+
+    var estimator = try motion.Estimator.init(std.testing.allocator, .{
+        .features = .{
+            .grid_columns = 4,
+            .grid_rows = 3,
+            .max_per_cell = 20,
+            .min_distance = 2,
+            .border = 0,
+        },
+        .minimum_tracks = 8,
+    });
+    defer estimator.deinit();
+    const estimate = try estimator.estimate(
+        .{
+            .pixels = &previous,
+            .width = width,
+            .height = height,
+            .stride = width,
+        },
+        .{
+            .pixels = &current,
+            .width = width,
+            .height = height,
+            .stride = width,
+        },
+    );
+
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_x),
+        estimate.transform.x,
+        0.35,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_y),
+        estimate.transform.y,
+        0.35,
+    );
+    try std.testing.expect(estimate.spatial_coverage < 0.3);
+    try std.testing.expect(estimate.confidence < 0.25);
 }
 
 test "native BGRA warper preserves an identity frame" {
