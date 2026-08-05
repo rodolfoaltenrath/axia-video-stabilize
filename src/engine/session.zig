@@ -30,6 +30,7 @@ pub const Observer = struct {
 
 pub const Options = struct {
     analyzer: analyzer_mod.Options = .{},
+    trajectory_integration: trajectory.IntegrationOptions = .{},
     smoothing_radius_seconds: f64 = 1.0,
     crop: crop.Options = .{},
     observer: Observer = .{},
@@ -138,9 +139,10 @@ const NativeSession = struct {
 
         const owned_records = try records.toOwnedSlice();
         errdefer allocator.free(owned_records);
-        const raw_trajectory = try trajectory.integrateAnalysis(
+        const raw_trajectory = try trajectory.integrateAnalysisWithOptions(
             allocator,
             owned_records,
+            options.trajectory_integration,
         );
         errdefer allocator.free(raw_trajectory);
         const smoothed_trajectory = try trajectory.smoothTimed(

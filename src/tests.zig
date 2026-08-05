@@ -189,6 +189,226 @@ test "low confidence motion does not contaminate later poses" {
     try std.testing.expectApproxEqAbs(@as(f64, 1), poses[2].y, 0.000001);
 }
 
+test "short low confidence gap is reconstructed using VFR timing" {
+    const time_base = engine_types.Rational{
+        .numerator = 1,
+        .denominator = 1000,
+    };
+    const records = [_]engine_types.AnalysisRecord{
+        engine_types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = time_base,
+        }, 0),
+        .{
+            .timing = .{ .index = 1, .pts = 100, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 1 },
+            .confidence = 1,
+        },
+        .{
+            .timing = .{ .index = 2, .pts = 300, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 100 },
+            .confidence = 0,
+            .flags = .{ .low_confidence = true, .fallback = true },
+        },
+        .{
+            .timing = .{ .index = 3, .pts = 400, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 1 },
+            .confidence = 1,
+        },
+    };
+    const poses = try trajectory.integrateAnalysis(
+        std.testing.allocator,
+        &records,
+    );
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 1), poses[1].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 4), poses[3].x, 0.000001);
+}
+
+test "short motion gap interpolates rotation and logarithmic scale" {
+    const time_base = engine_types.Rational{
+        .numerator = 1,
+        .denominator = 1,
+    };
+    const records = [_]engine_types.AnalysisRecord{
+        engine_types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = time_base,
+        }, 0),
+        .{
+            .timing = .{ .index = 1, .pts = 1, .time_base = time_base },
+            .global_motion_from_previous = .{
+                .angle = 0.1,
+                .scale = @exp(0.02),
+            },
+            .confidence = 1,
+        },
+        .{
+            .timing = .{ .index = 2, .pts = 2, .time_base = time_base },
+            .confidence = 0,
+            .flags = .{ .low_confidence = true, .fallback = true },
+        },
+        .{
+            .timing = .{ .index = 3, .pts = 3, .time_base = time_base },
+            .global_motion_from_previous = .{
+                .angle = 0.3,
+                .scale = @exp(0.06),
+            },
+            .confidence = 1,
+        },
+    };
+    const poses = try trajectory.integrateAnalysis(
+        std.testing.allocator,
+        &records,
+    );
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 0.3), poses[2].angle, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.06), poses[2].log_scale, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.6), poses[3].angle, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.12), poses[3].log_scale, 0.000001);
+}
+
+test "motion gap reconstruction does not cross scene cuts" {
+    const time_base = engine_types.Rational{
+        .numerator = 1,
+        .denominator = 30,
+    };
+    const records = [_]engine_types.AnalysisRecord{
+        engine_types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = time_base,
+        }, 0),
+        .{
+            .timing = .{ .index = 1, .pts = 1, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 2 },
+            .confidence = 1,
+        },
+        .{
+            .timing = .{ .index = 2, .pts = 2, .time_base = time_base },
+            .confidence = 0,
+            .flags = .{ .low_confidence = true, .fallback = true },
+        },
+        .{
+            .timing = .{ .index = 3, .pts = 3, .time_base = time_base },
+            .confidence = 1,
+            .scene_id = 1,
+            .flags = .{ .scene_cut = true },
+        },
+        .{
+            .timing = .{ .index = 4, .pts = 4, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 8 },
+            .confidence = 1,
+            .scene_id = 1,
+        },
+    };
+    const poses = try trajectory.integrateAnalysis(
+        std.testing.allocator,
+        &records,
+    );
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), poses[3].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 8), poses[4].x, 0.000001);
+}
+
+test "long motion gaps remain identity" {
+    const time_base = engine_types.Rational{
+        .numerator = 1,
+        .denominator = 30,
+    };
+    var records: [7]engine_types.AnalysisRecord = undefined;
+    records[0] = engine_types.AnalysisRecord.reference(.{
+        .index = 0,
+        .pts = 0,
+        .time_base = time_base,
+    }, 0);
+    records[1] = .{
+        .timing = .{ .index = 1, .pts = 1, .time_base = time_base },
+        .global_motion_from_previous = .{ .x = 2 },
+        .confidence = 1,
+    };
+    for (2..6) |index| {
+        records[index] = .{
+            .timing = .{
+                .index = @intCast(index),
+                .pts = @intCast(index),
+                .time_base = time_base,
+            },
+            .confidence = 0,
+            .flags = .{ .low_confidence = true, .fallback = true },
+        };
+    }
+    records[6] = .{
+        .timing = .{ .index = 6, .pts = 6, .time_base = time_base },
+        .global_motion_from_previous = .{ .x = 4 },
+        .confidence = 1,
+    };
+    const poses = try trajectory.integrateAnalysis(
+        std.testing.allocator,
+        &records,
+    );
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[5].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 6), poses[6].x, 0.000001);
+}
+
+test "motion gap reconstruction respects acceleration limits" {
+    const time_base = engine_types.Rational{
+        .numerator = 1,
+        .denominator = 1,
+    };
+    const records = [_]engine_types.AnalysisRecord{
+        engine_types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = time_base,
+        }, 0),
+        .{
+            .timing = .{ .index = 1, .pts = 1, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 2 },
+            .confidence = 1,
+        },
+        .{
+            .timing = .{ .index = 2, .pts = 2, .time_base = time_base },
+            .confidence = 0,
+            .flags = .{ .low_confidence = true, .fallback = true },
+        },
+        .{
+            .timing = .{ .index = 3, .pts = 3, .time_base = time_base },
+            .global_motion_from_previous = .{ .x = 10 },
+            .confidence = 1,
+        },
+    };
+    const poses = try trajectory.integrateAnalysisWithOptions(
+        std.testing.allocator,
+        &records,
+        .{ .maximum_translation_acceleration = 1 },
+    );
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 12), poses[3].x, 0.000001);
+}
+
+test "motion gap reconstruction rejects invalid limits" {
+    try std.testing.expectError(
+        error.InvalidIntegrationOptions,
+        trajectory.integrateAnalysisWithOptions(
+            std.testing.allocator,
+            &.{},
+            .{ .maximum_rotation_acceleration = std.math.nan(f64) },
+        ),
+    );
+}
+
 test "gaussian smoothing does not cross scene cuts" {
     const poses = [_]trajectory.Pose{
         .{ .x = 0, .segment = 0, .timestamp_seconds = 0 },

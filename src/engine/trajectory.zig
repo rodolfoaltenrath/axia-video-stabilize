@@ -2,7 +2,20 @@ const std = @import("std");
 const types = @import("types.zig");
 
 pub const TrajectoryError = error{
+    InvalidIntegrationOptions,
+    InvalidTrajectoryTimestamp,
     InvalidSmoothingWindow,
+};
+
+pub const IntegrationOptions = struct {
+    /// Zero disables reconstruction. Gaps need reliable samples on both sides.
+    maximum_interpolated_gap_frames: u8 = 3,
+    /// Maximum change in pairwise translation velocity, in analysis pixels/s².
+    maximum_translation_acceleration: f64 = 20_000,
+    /// Maximum change in pairwise angular velocity, in radians/s².
+    maximum_rotation_acceleration: f64 = 100,
+    /// Maximum change in logarithmic scale velocity, in log(scale)/s².
+    maximum_log_scale_acceleration: f64 = 50,
 };
 
 /// Integrated camera pose for one decoded frame.
@@ -31,40 +44,215 @@ pub fn integrateAnalysis(
     records: []const types.AnalysisRecord,
 ) (TrajectoryError || types.ValidationError ||
     std.mem.Allocator.Error)![]Pose {
+    return integrateAnalysisWithOptions(allocator, records, .{});
+}
+
+pub fn integrateAnalysisWithOptions(
+    allocator: std.mem.Allocator,
+    records: []const types.AnalysisRecord,
+    options: IntegrationOptions,
+) (TrajectoryError || types.ValidationError ||
+    std.mem.Allocator.Error)![]Pose {
+    try validateIntegrationOptions(options);
     const poses = try allocator.alloc(Pose, records.len);
     errdefer allocator.free(poses);
     if (records.len == 0) return poses;
 
+    const samples = try allocator.alloc(PairwiseSample, records.len);
+    defer allocator.free(samples);
     var validator = types.SequenceValidator{};
-    var current = types.SimilarityTransform.identity();
     for (records, 0..) |record, index| {
         try validator.push(record);
+        const timestamp = try record.timing.presentationSeconds();
+        if (index > 0 and timestamp <= samples[index - 1].timestamp_seconds) {
+            return error.InvalidTrajectoryTimestamp;
+        }
+        const reliable = index > 0 and
+            !record.flags.scene_cut and
+            !record.flags.low_confidence and
+            !record.flags.fallback;
+        samples[index] = .{
+            .transform = if (reliable)
+                record.global_motion_from_previous
+            else
+                types.SimilarityTransform.identity(),
+            .timestamp_seconds = timestamp,
+            .duration_seconds = if (index == 0)
+                0
+            else
+                timestamp - samples[index - 1].timestamp_seconds,
+            .scene_id = record.scene_id,
+            .scene_cut = record.flags.scene_cut,
+            .reliable = reliable,
+        };
+    }
+    try validator.finish(@intCast(records.len));
+    interpolateShortGaps(samples, options);
+
+    var current = types.SimilarityTransform.identity();
+    for (records, samples, poses, 0..) |record, sample, *pose, index| {
         if (index == 0 or record.flags.scene_cut) {
             current = types.SimilarityTransform.identity();
         } else {
-            // A weak pairwise estimate must not poison every absolute pose
-            // that follows it. Missing motion can be handled as a local loss
-            // of stabilization; integrating an outlier creates a permanent
-            // jump in the camera path.
-            const measured_motion = if (record.flags.low_confidence or
-                record.flags.fallback)
-                types.SimilarityTransform.identity()
-            else
-                record.global_motion_from_previous;
             current = compose(
-                measured_motion,
+                sample.transform,
                 current,
             );
         }
-        poses[index] = poseFromTransform(
+        pose.* = poseFromTransform(
             current,
             record.confidence,
             record.scene_id,
-            try record.timing.presentationSeconds(),
+            sample.timestamp_seconds,
         );
     }
-    try validator.finish(@intCast(records.len));
     return poses;
+}
+
+const PairwiseSample = struct {
+    transform: types.SimilarityTransform,
+    timestamp_seconds: f64,
+    duration_seconds: f64,
+    scene_id: u32,
+    scene_cut: bool,
+    reliable: bool,
+};
+
+const MotionRate = struct {
+    x: f64,
+    y: f64,
+    angle: f64,
+    log_scale: f64,
+};
+
+fn interpolateShortGaps(
+    samples: []PairwiseSample,
+    options: IntegrationOptions,
+) void {
+    if (options.maximum_interpolated_gap_frames == 0 or samples.len < 3) {
+        return;
+    }
+
+    var index: usize = 1;
+    while (index < samples.len) {
+        if (samples[index].scene_cut or samples[index].reliable) {
+            index += 1;
+            continue;
+        }
+
+        const gap_start = index;
+        const scene_id = samples[index].scene_id;
+        while (index < samples.len and
+            !samples[index].scene_cut and
+            samples[index].scene_id == scene_id and
+            !samples[index].reliable)
+        {
+            index += 1;
+        }
+        const gap_end = index;
+        const gap_length = gap_end - gap_start;
+        if (gap_length > options.maximum_interpolated_gap_frames or
+            gap_start == 0 or gap_end >= samples.len)
+        {
+            continue;
+        }
+
+        const left = samples[gap_start - 1];
+        const right = samples[gap_end];
+        if (!left.reliable or !right.reliable or
+            left.scene_id != scene_id or right.scene_id != scene_id)
+        {
+            continue;
+        }
+        const left_rate = motionRate(left);
+        const right_rate = motionRate(right);
+        const boundary_seconds = right.timestamp_seconds -
+            left.timestamp_seconds;
+        if (!ratesAreCompatible(
+            left_rate,
+            right_rate,
+            boundary_seconds,
+            options,
+        )) {
+            continue;
+        }
+
+        for (samples[gap_start..gap_end]) |*sample| {
+            const amount = (sample.timestamp_seconds -
+                left.timestamp_seconds) / boundary_seconds;
+            sample.transform = transformFromRate(
+                interpolateRate(left_rate, right_rate, amount),
+                sample.duration_seconds,
+            );
+        }
+    }
+}
+
+fn motionRate(sample: PairwiseSample) MotionRate {
+    return .{
+        .x = sample.transform.x / sample.duration_seconds,
+        .y = sample.transform.y / sample.duration_seconds,
+        .angle = sample.transform.angle / sample.duration_seconds,
+        .log_scale = @log(sample.transform.scale) / sample.duration_seconds,
+    };
+}
+
+fn interpolateRate(left: MotionRate, right: MotionRate, amount: f64) MotionRate {
+    return .{
+        .x = left.x + (right.x - left.x) * amount,
+        .y = left.y + (right.y - left.y) * amount,
+        .angle = left.angle + (right.angle - left.angle) * amount,
+        .log_scale = left.log_scale +
+            (right.log_scale - left.log_scale) * amount,
+    };
+}
+
+fn transformFromRate(rate: MotionRate, duration_seconds: f64) types.SimilarityTransform {
+    return .{
+        .x = rate.x * duration_seconds,
+        .y = rate.y * duration_seconds,
+        .angle = rate.angle * duration_seconds,
+        .scale = @exp(rate.log_scale * duration_seconds),
+    };
+}
+
+fn ratesAreCompatible(
+    left: MotionRate,
+    right: MotionRate,
+    elapsed_seconds: f64,
+    options: IntegrationOptions,
+) bool {
+    if (!std.math.isFinite(elapsed_seconds) or elapsed_seconds <= 0) {
+        return false;
+    }
+    const acceleration_x = (right.x - left.x) / elapsed_seconds;
+    const acceleration_y = (right.y - left.y) / elapsed_seconds;
+    const translation_acceleration = @sqrt(
+        acceleration_x * acceleration_x +
+            acceleration_y * acceleration_y,
+    );
+    const rotation_acceleration = @abs(
+        (right.angle - left.angle) / elapsed_seconds,
+    );
+    const scale_acceleration = @abs(
+        (right.log_scale - left.log_scale) / elapsed_seconds,
+    );
+    return translation_acceleration <=
+        options.maximum_translation_acceleration and
+        rotation_acceleration <= options.maximum_rotation_acceleration and
+        scale_acceleration <= options.maximum_log_scale_acceleration;
+}
+
+fn validateIntegrationOptions(options: IntegrationOptions) TrajectoryError!void {
+    if (!std.math.isFinite(options.maximum_translation_acceleration) or
+        options.maximum_translation_acceleration <= 0 or
+        !std.math.isFinite(options.maximum_rotation_acceleration) or
+        options.maximum_rotation_acceleration <= 0 or
+        !std.math.isFinite(options.maximum_log_scale_acceleration) or
+        options.maximum_log_scale_acceleration <= 0)
+    {
+        return error.InvalidIntegrationOptions;
+    }
 }
 
 /// Timestamp-aware smoothing for the native pipeline. `radius_seconds` has the
