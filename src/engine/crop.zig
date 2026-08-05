@@ -151,6 +151,58 @@ pub fn requiredZoom(
     return .{ .zoom = upper, .limited = false };
 }
 
+/// Reduces a correction only when the configured maximum zoom cannot keep the
+/// complete output frame inside the source image. Translation and rotation are
+/// interpolated linearly; scale is interpolated in log space.
+pub fn constrainCorrection(
+    correction: trajectory.Correction,
+    width: u32,
+    height: u32,
+    options: Options,
+) CropError!trajectory.Correction {
+    try validateOptions(width, height, options);
+    if (try isSafe(
+        correction,
+        options.max_zoom,
+        width,
+        height,
+        options.edge_margin_pixels,
+    )) {
+        return correction;
+    }
+
+    var lower: f64 = 0;
+    var upper: f64 = 1;
+    for (0..options.search_iterations) |_| {
+        const candidate = (lower + upper) / 2.0;
+        const adjusted = scaleCorrection(correction, candidate);
+        if (try isSafe(
+            adjusted,
+            options.max_zoom,
+            width,
+            height,
+            options.edge_margin_pixels,
+        )) {
+            lower = candidate;
+        } else {
+            upper = candidate;
+        }
+    }
+    return scaleCorrection(correction, lower);
+}
+
+fn scaleCorrection(
+    correction: trajectory.Correction,
+    amount: f64,
+) trajectory.Correction {
+    return .{
+        .x = correction.x * amount,
+        .y = correction.y * amount,
+        .angle = correction.angle * amount,
+        .scale = @exp(@log(correction.scale) * amount),
+    };
+}
+
 fn isSafe(
     correction: trajectory.Correction,
     zoom: f64,

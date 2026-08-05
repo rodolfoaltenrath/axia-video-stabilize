@@ -26,6 +26,17 @@ pub fn build(b: *std.Build) void {
     const test_video_frames = b.option(u64, "test-video-frames", "Expected decoded fixture frame count") orelse 0;
     const test_video_audio_streams = b.option(u32, "test-video-audio-streams", "Expected audio streams in the native fixture") orelse 0;
     const test_video_require_vfr = b.option(bool, "test-video-require-vfr", "Require varying fixture PTS deltas") orelse false;
+    const opencv_bridge = b.path("native/opencv_bridge.cpp");
+    const bridge_include = b.path("native");
+    const linux_opencv_bridge = if (native_opencv and target.result.os.tag == .linux)
+        buildLinuxOpenCvBridge(
+            b,
+            opencv_bridge,
+            bridge_include,
+            opencv_include,
+        )
+    else
+        null;
 
     const raylib_dep = b.dependency("raylib_zig", .{
         .target = target,
@@ -63,8 +74,9 @@ pub fn build(b: *std.Build) void {
         opencv_include,
         opencv_lib,
         target.result.os.tag,
-        b.path("native/opencv_bridge.cpp"),
-        b.path("native"),
+        opencv_bridge,
+        bridge_include,
+        linux_opencv_bridge,
     );
 
     // raylib links the platform windowing dependencies. These explicit OpenGL
@@ -102,8 +114,9 @@ pub fn build(b: *std.Build) void {
         opencv_include,
         opencv_lib,
         target.result.os.tag,
-        b.path("native/opencv_bridge.cpp"),
-        b.path("native"),
+        opencv_bridge,
+        bridge_include,
+        linux_opencv_bridge,
     );
     b.installArtifact(cli);
 
@@ -135,8 +148,9 @@ pub fn build(b: *std.Build) void {
         opencv_include,
         opencv_lib,
         target.result.os.tag,
-        b.path("native/opencv_bridge.cpp"),
-        b.path("native"),
+        opencv_bridge,
+        bridge_include,
+        linux_opencv_bridge,
     );
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -177,6 +191,7 @@ fn linkNativeDependencies(
     target_os: std.Target.Os.Tag,
     opencv_bridge: std.Build.LazyPath,
     bridge_include: std.Build.LazyPath,
+    linux_opencv_bridge: ?std.Build.LazyPath,
 ) void {
     if (native_ffmpeg) {
         if (ffmpeg_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
@@ -190,11 +205,21 @@ fn linkNativeDependencies(
     if (native_opencv) {
         if (opencv_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
         artifact.addIncludePath(bridge_include);
-        artifact.addCSourceFile(.{
-            .file = opencv_bridge,
-            .flags = &.{ "-std=c++17", "-fexceptions" },
-        });
-        artifact.linkLibCpp();
+        if (linux_opencv_bridge) |object| {
+            artifact.addObjectFile(object);
+            artifact.addObjectFile(.{
+                .cwd_relative = findCompilerLibrary(b, "libstdc++.so"),
+            });
+            artifact.addObjectFile(.{
+                .cwd_relative = findCompilerLibrary(b, "libgcc_s.so"),
+            });
+        } else {
+            artifact.addCSourceFile(.{
+                .file = opencv_bridge,
+                .flags = &.{ "-std=c++17", "-fexceptions" },
+            });
+            artifact.linkLibCpp();
+        }
 
         if (opencv_lib) |path| {
             artifact.addLibraryPath(.{ .cwd_relative = path });
@@ -226,4 +251,46 @@ fn linkNativeDependencies(
             },
         }
     }
+}
+
+fn buildLinuxOpenCvBridge(
+    b: *std.Build,
+    source: std.Build.LazyPath,
+    bridge_include: std.Build.LazyPath,
+    opencv_include: ?[]const u8,
+) std.Build.LazyPath {
+    const compiler = b.findProgram(&.{ "c++", "g++", "clang++" }, &.{}) catch
+        @panic("OpenCV on Linux requires a system C++ compiler");
+    const command = b.addSystemCommand(&.{
+        compiler,
+        "-c",
+        "-std=c++17",
+        "-fPIC",
+        "-fexceptions",
+    });
+    command.addPrefixedDirectoryArg("-I", bridge_include);
+    if (opencv_include) |path| {
+        command.addArg(b.fmt("-I{s}", .{path}));
+    }
+    command.addFileArg(source);
+    command.addArg("-o");
+    return command.addOutputFileArg("opencv_bridge.o");
+}
+
+fn findCompilerLibrary(b: *std.Build, library: []const u8) []const u8 {
+    const compiler = b.findProgram(&.{ "c++", "g++", "clang++" }, &.{}) catch
+        @panic("OpenCV on Linux requires a system C++ compiler");
+    const result = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &.{ compiler, b.fmt("-print-file-name={s}", .{library}) },
+        .env_map = &b.graph.env_map,
+    }) catch @panic("could not locate libstdc++");
+    if (result.term != .Exited or result.term.Exited != 0) {
+        @panic("could not locate libstdc++");
+    }
+    const path = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (path.len == 0 or std.mem.eql(u8, path, library)) {
+        @panic("system C++ compiler did not report a required runtime library");
+    }
+    return b.dupe(path);
 }

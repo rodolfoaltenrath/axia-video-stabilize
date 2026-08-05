@@ -89,12 +89,11 @@ const NativeRenderer = struct {
             @as(usize, decoder.info.source.width),
             decoder_mod.PixelFormat.bgra8.bytesPerPixel(),
         ) catch return error.SizeOverflow;
-        
-        // PADDING CONTRA SEGFAULT SIMD OpenCV
-        const padded_height = std.mem.alignForward(usize, @as(usize, decoder.info.source.height), 32);
-        const base_size = std.math.mul(usize, stride, padded_height) catch return error.SizeOverflow;
-        const buffer_size = base_size + 64;
-        
+        const buffer_size = std.math.mul(
+            usize,
+            stride,
+            @as(usize, decoder.info.source.height),
+        ) catch return error.SizeOverflow;
         const output_pixels = try allocator.alloc(u8, buffer_size);
         defer allocator.free(output_pixels);
 

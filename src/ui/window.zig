@@ -142,11 +142,11 @@ fn drawPreview(
         rl.drawRectangleRounded(pill, 0.5, 8, rl.Color.init(0, 0, 0, 160));
         components.text(msg, pill.x + 8, pill.y + 6, 12, rl.Color.init(231, 235, 242, 255));
     }
-    
+
     if (preview.failed) {
         components.text("PREVIEW INDISPONÍVEL", viewport.x + 18, viewport.y + 18, 12, theme.danger);
     }
-    
+
     const controls_width = @min(area.width - 40, @max(viewport.width, 460));
     return drawPreviewControls(.{
         .x = area.x + (area.width - controls_width) * 0.5,
@@ -381,7 +381,7 @@ fn drawTimeline(
             .height = track.height - 16,
         };
         rl.drawRectangleRounded(clip, 0.08, 6, theme.accent_soft);
-        
+
         // Efeito de inner glow (vidro) no clipe
         const inner_clip = rl.Rectangle{
             .x = clip.x + 1,
@@ -391,7 +391,7 @@ fn drawTimeline(
         };
         rl.drawRectangleRoundedLinesEx(inner_clip, 0.08, 6, 1, rl.Color.init(255, 255, 255, 25));
         rl.drawRectangleRoundedLinesEx(clip, 0.08, 6, 1, theme.accent);
-        
+
         components.textStrong(snapshot.media.name(), clip.x + 12, clip.y + 18, 12, theme.text);
 
         // Renderiza o tempo total dentro do próprio bloco do clipe se ele não for muito esmagado
@@ -403,7 +403,7 @@ fn drawTimeline(
                 "{d:0>2}:{d:0>2}",
                 .{ dur_total / 60, dur_total % 60 },
             ) catch "00:00";
-            
+
             const dur_size = fonts.measure(dur_text, 11, .regular);
             components.text(dur_text, clip.x + clip.width - dur_size.x - 12, clip.y + 19, 11, theme.accent);
         }

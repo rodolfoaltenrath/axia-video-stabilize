@@ -79,12 +79,11 @@ const NativeAnalyzer = struct {
         const width = decoder.info.analysis.width;
         const height = decoder.info.analysis.height;
         const stride: usize = @intCast(width);
-        
-        // PADDING SEGFAULT OpenCV (Blindagem extra)
-        const padded_height = std.mem.alignForward(usize, @as(usize, height), 32);
-        const base_size = std.math.mul(usize, stride, padded_height) catch return error.FrameBufferSizeMismatch;
-        const buffer_size = base_size + 64;
-        
+        const buffer_size = std.math.mul(
+            usize,
+            stride,
+            @as(usize, height),
+        ) catch return error.FrameBufferSizeMismatch;
         const previous_pixels = try allocator.alloc(u8, buffer_size);
         errdefer allocator.free(previous_pixels);
 

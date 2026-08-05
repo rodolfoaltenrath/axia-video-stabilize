@@ -87,20 +87,18 @@ const NativeExporter = struct {
         }
         if (options.observer.isCancelled()) return error.Cancelled;
 
-        const video_temp_path = try std.fmt.allocPrint(
+        const video_temp_path = try temporaryPath(
             allocator,
-            "{s}.axia-video.mp4",
-            .{output_path},
+            output_path,
+            "video",
         );
         defer allocator.free(video_temp_path);
-        const partial_path = try std.fmt.allocPrint(
+        const partial_path = try temporaryPath(
             allocator,
-            "{s}.axia-partial.mp4",
-            .{output_path},
+            output_path,
+            "partial",
         );
         defer allocator.free(partial_path);
-        deleteFile(video_temp_path);
-        deleteFile(partial_path);
         defer deleteFile(video_temp_path);
         var published = false;
         defer if (!published) deleteFile(partial_path);
@@ -155,7 +153,7 @@ const NativeExporter = struct {
             return err;
         };
         try encoder.finish();
-        
+
         // Close AVIO before reopening the intermediate file for remuxing.
         encoder.deinit();
         encoder_open = false;
@@ -174,7 +172,7 @@ const NativeExporter = struct {
             options.muxer,
         );
         if (options.observer.isCancelled()) return error.Cancelled;
-        
+
         // A publicação final vai garantir que não haja conflitos de nome
         publishFile(partial_path, output_path) catch
             return error.PublishFailed;
@@ -255,13 +253,19 @@ fn deleteFile(path: []const u8) void {
     }
 }
 
-fn publishFile(source: []const u8, destination: []const u8) !void {
-    // -------------------------------------------------------------
-    // FIX: O Windows recusa sobrescrever arquivos com rename. 
-    // Precisamos apagar o destino caso ele exista.
-    // -------------------------------------------------------------
-    deleteFile(destination);
+fn temporaryPath(
+    allocator: std.mem.Allocator,
+    output_path: []const u8,
+    label: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "{s}.axia-{s}-{x}.mp4",
+        .{ output_path, label, std.crypto.random.int(u64) },
+    );
+}
 
+fn publishFile(source: []const u8, destination: []const u8) !void {
     if (std.fs.path.isAbsolute(source) and
         std.fs.path.isAbsolute(destination))
     {
@@ -269,4 +273,73 @@ fn publishFile(source: []const u8, destination: []const u8) !void {
     } else {
         try std.fs.cwd().rename(source, destination);
     }
+}
+
+test "publishing replaces an existing destination atomically" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+
+    try temporary.dir.writeFile(.{
+        .sub_path = "source.mp4",
+        .data = "new-video",
+    });
+    try temporary.dir.writeFile(.{
+        .sub_path = "destination.mp4",
+        .data = "old-video",
+    });
+
+    const root = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ ".zig-cache", "tmp", temporary.sub_path[0..] },
+    );
+    defer std.testing.allocator.free(root);
+    const source = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ root, "source.mp4" },
+    );
+    defer std.testing.allocator.free(source);
+    const destination = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ root, "destination.mp4" },
+    );
+    defer std.testing.allocator.free(destination);
+
+    try publishFile(source, destination);
+    const contents = try temporary.dir.readFileAlloc(
+        std.testing.allocator,
+        "destination.mp4",
+        64,
+    );
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualStrings("new-video", contents);
+    try std.testing.expectError(
+        error.FileNotFound,
+        temporary.dir.openFile("source.mp4", .{}),
+    );
+}
+
+test "temporary export paths are unique and stay beside the destination" {
+    const first = try temporaryPath(
+        std.testing.allocator,
+        "exports/final.mp4",
+        "video",
+    );
+    defer std.testing.allocator.free(first);
+    const second = try temporaryPath(
+        std.testing.allocator,
+        "exports/final.mp4",
+        "video",
+    );
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    try std.testing.expectEqualStrings(
+        "exports",
+        std.fs.path.dirname(first).?,
+    );
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        std.fs.path.basename(first),
+        "final.mp4.axia-video-",
+    ));
 }

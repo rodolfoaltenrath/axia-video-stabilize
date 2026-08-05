@@ -241,12 +241,11 @@ const NativeDecoder = struct {
             @as(usize, output_dimensions.width),
             options.output_format.bytesPerPixel(),
         ) catch return error.InvalidVideoDimensions;
-        
-        // PADDING CONTRA SEGFAULT SIMD: Alinha a altura e adiciona margem
-        const padded_height = std.mem.alignForward(usize, @as(usize, output_dimensions.height), 32);
-        const base_size = std.math.mul(usize, output_stride, padded_height) catch return error.InvalidVideoDimensions;
-        const output_size = base_size + 64; // Constante AV_INPUT_BUFFER_PADDING_SIZE
-        
+        const output_size = std.math.mul(
+            usize,
+            output_stride,
+            @as(usize, output_dimensions.height),
+        ) catch return error.InvalidVideoDimensions;
         const output_pixels = try allocator.alloc(
             u8,
             output_size,
@@ -359,6 +358,9 @@ const NativeDecoder = struct {
                     self.packet,
                 );
                 if (read_result < 0) {
+                    if (read_result != ffmpeg.AVERROR_EOF) {
+                        return error.DecodeFailed;
+                    }
                     self.draining = true;
                     if (ffmpeg.avcodec_send_packet(self.codec_context, null) < 0) {
                         return error.DecodeFailed;

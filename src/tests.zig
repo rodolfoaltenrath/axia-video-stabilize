@@ -150,6 +150,45 @@ test "scene cut starts an independent trajectory segment" {
     try std.testing.expectEqual(@as(f64, 3), poses[3].x);
 }
 
+test "low confidence motion does not contaminate later poses" {
+    const records = [_]engine_types.AnalysisRecord{
+        engine_types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = .{ .numerator = 1, .denominator = 30 },
+        }, 0),
+        .{
+            .timing = .{
+                .index = 1,
+                .pts = 1,
+                .time_base = .{ .numerator = 1, .denominator = 30 },
+            },
+            .global_motion_from_previous = .{ .x = 100, .y = -50 },
+            .confidence = 0.1,
+            .flags = .{ .low_confidence = true },
+        },
+        .{
+            .timing = .{
+                .index = 2,
+                .pts = 2,
+                .time_base = .{ .numerator = 1, .denominator = 30 },
+            },
+            .global_motion_from_previous = .{ .x = 2, .y = 1 },
+            .confidence = 1,
+        },
+    };
+    const poses = try trajectory.integrateAnalysis(
+        std.testing.allocator,
+        &records,
+    );
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 0), poses[1].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), poses[1].y, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), poses[2].y, 0.000001);
+}
+
 test "gaussian smoothing does not cross scene cuts" {
     const poses = [_]trajectory.Pose{
         .{ .x = 0, .segment = 0, .timestamp_seconds = 0 },
@@ -249,6 +288,31 @@ test "crop planner finds minimum zoom for translation" {
     );
 }
 
+test "crop constraint attenuates an unsafe correction" {
+    const options = crop.Options{
+        .max_zoom = 1.2,
+        .search_iterations = 48,
+    };
+    const original = trajectory.Correction{ .x = 80, .y = -45 };
+    const constrained = try crop.constrainCorrection(
+        original,
+        320,
+        180,
+        options,
+    );
+    const requirement = try crop.requiredZoom(
+        constrained,
+        320,
+        180,
+        options,
+    );
+
+    try std.testing.expect(@abs(constrained.x) < @abs(original.x));
+    try std.testing.expect(@abs(constrained.y) < @abs(original.y));
+    try std.testing.expect(!requirement.limited);
+    try std.testing.expect(requirement.zoom <= options.max_zoom);
+}
+
 test "dynamic crop anticipates motion without crossing scenes" {
     const corrections = [_]trajectory.Correction{
         .{},
@@ -319,6 +383,7 @@ test "disabled native encoder fails explicitly" {
             "output.mp4",
             .{ .width = 320, .height = 180 },
             .{ .numerator = 1, .denominator = 30 },
+            .{ .numerator = 30, .denominator = 1 },
             .{},
         ),
     );
@@ -882,6 +947,7 @@ test "native encoder and muxer produce a playable MP4 container" {
         encoded_path,
         .{ .width = width, .height = height },
         .{ .numerator = 1, .denominator = 30 },
+        .{ .numerator = 30, .denominator = 1 },
         .{ .preset = "ultrafast" },
     );
     var encoder_open = true;

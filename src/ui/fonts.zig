@@ -25,7 +25,7 @@ pub fn init() !void {
     // Trilinear avisa a GPU para usar os Mipmaps criados acima suavemente
     rl.setTextureFilter(regular.texture, .trilinear);
     rl.setTextureFilter(semibold.texture, .trilinear);
-    
+
     initialized = true;
 }
 

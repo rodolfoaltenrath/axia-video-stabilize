@@ -161,7 +161,7 @@ const NativeEncoder = struct {
             .num = time_base.numerator,
             .den = time_base.denominator,
         };
-        
+
         if (frame_rate) |fr| {
             codec_context.framerate = .{
                 .num = fr.numerator,
@@ -348,7 +348,7 @@ const NativeEncoder = struct {
         if (ffmpeg.av_frame_make_writable(self.frame) < 0) {
             return error.FrameAllocationFailed;
         }
-        
+
         // Proteção contra leitura fora do índice 3 no array C
         var source_data = [_][*c]const u8{
             input.pixels.ptr, null, null, null, null, null, null, null,
@@ -356,7 +356,7 @@ const NativeEncoder = struct {
         var source_stride = [_]c_int{
             @intCast(input.stride), 0, 0, 0, 0, 0, 0, 0,
         };
-        
+
         const converted = ffmpeg.sws_scale(
             self.sws_context,
             &source_data,
@@ -423,10 +423,10 @@ const NativeEncoder = struct {
                 self.output_context,
                 self.packet,
             );
-            
+
             // Unref explícito obrigatório após o envio para não vazar memória no write loop
             ffmpeg.av_packet_unref(self.packet);
-            
+
             if (write_result < 0) {
                 return error.PacketWriteFailed;
             }

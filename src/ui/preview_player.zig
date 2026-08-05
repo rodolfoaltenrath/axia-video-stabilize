@@ -72,7 +72,7 @@ pub const Player = struct {
         const info = metadata_decoder.info;
 
         // --- A MÁGICA DO KISS AQUI ---
-        // Alocamos a textura sempre no tamanho máximo. O FFmpeg fará o fit 
+        // Alocamos a textura sempre no tamanho máximo. O FFmpeg fará o fit
         // internamente e preencherá as bordas com transparência.
         self.width = max_preview_width;
         self.height = max_preview_height;
@@ -274,7 +274,7 @@ pub const Player = struct {
 
         const seek_text = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{start_seconds});
         defer self.allocator.free(seek_text);
-        
+
         // Scale com force_original_aspect_ratio reduz o vídeo para caber dentro das medidas
         // Pad preenche o restante das medidas finais para não distorcer. color=black@0 é invisível.
         const scale_filter = try std.fmt.allocPrint(

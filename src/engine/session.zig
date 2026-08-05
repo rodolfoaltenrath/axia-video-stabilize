@@ -162,6 +162,14 @@ const NativeSession = struct {
             video_info.source,
         );
         errdefer allocator.free(render_corrections);
+        for (render_corrections) |*correction| {
+            correction.* = try crop.constrainCorrection(
+                correction.*,
+                video_info.source.width,
+                video_info.source.height,
+                options.crop,
+            );
+        }
         const crop_frames = try crop.plan(
             allocator,
             render_corrections,

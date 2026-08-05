@@ -42,8 +42,17 @@ pub fn integrateAnalysis(
         if (index == 0 or record.flags.scene_cut) {
             current = types.SimilarityTransform.identity();
         } else {
+            // A weak pairwise estimate must not poison every absolute pose
+            // that follows it. Missing motion can be handled as a local loss
+            // of stabilization; integrating an outlier creates a permanent
+            // jump in the camera path.
+            const measured_motion = if (record.flags.low_confidence or
+                record.flags.fallback)
+                types.SimilarityTransform.identity()
+            else
+                record.global_motion_from_previous;
             current = compose(
-                record.global_motion_from_previous,
+                measured_motion,
                 current,
             );
         }
