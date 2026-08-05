@@ -11,6 +11,9 @@ pub const Options = struct {
     decoder: decoder_mod.Options = .{},
     motion: motion.Options = .{},
     low_confidence_threshold: f32 = 0.25,
+    /// Confidence needed to veto a pixel-only hard cut. This is intentionally
+    /// stricter than the threshold used for an uncertain appearance change.
+    hard_scene_cut_tracking_confidence: f32 = 0.5,
     hard_scene_cut_histogram_distance: f32 = 0.55,
     uncertain_scene_cut_histogram_distance: f32 = 0.30,
     hard_scene_cut_pixel_difference: f32 = 0.65,
@@ -208,30 +211,49 @@ const NativeAnalyzer = struct {
         difference: FrameDifference,
         estimate: ?motion.Estimate,
     ) bool {
-        if (difference.histogram >=
-            self.options.hard_scene_cut_histogram_distance or
-            difference.pixels >=
-            self.options.hard_scene_cut_pixel_difference)
-        {
-            return true;
-        }
-        const appearance_changed =
-            difference.histogram >=
-            self.options.uncertain_scene_cut_histogram_distance or
-            difference.pixels >=
-            self.options.uncertain_scene_cut_pixel_difference;
-        return appearance_changed and
-            (estimate == null or
-            estimate.?.confidence <
-            self.options.low_confidence_threshold);
+        return classifySceneCut(difference, estimate, self.options);
     }
 };
+
+fn classifySceneCut(
+    difference: FrameDifference,
+    estimate: ?motion.Estimate,
+    options: Options,
+) bool {
+    // A histogram comparison does not depend on pixel alignment and a large
+    // change is strong evidence of a cut. Pixel-wise difference is different:
+    // a fast pan can replace most pixels while optical flow still proves that
+    // both frames belong to the same continuous shot.
+    if (difference.histogram >= options.hard_scene_cut_histogram_distance) {
+        return true;
+    }
+    const appearance_changed =
+        difference.histogram >=
+        options.uncertain_scene_cut_histogram_distance or
+        difference.pixels >= options.uncertain_scene_cut_pixel_difference;
+    if (!appearance_changed) return false;
+
+    const required_tracking_confidence = if (difference.pixels >=
+        options.hard_scene_cut_pixel_difference)
+        options.hard_scene_cut_tracking_confidence
+    else
+        options.low_confidence_threshold;
+    const reliable_tracking = if (estimate) |value|
+        value.confidence >= required_tracking_confidence
+    else
+        false;
+    return !reliable_tracking;
+}
 
 fn validateOptions(options: Options) AnalyzerError!void {
     if (options.decoder.output_format != .gray8 or
         !std.math.isFinite(options.low_confidence_threshold) or
         options.low_confidence_threshold < 0 or
         options.low_confidence_threshold > 1 or
+        !std.math.isFinite(options.hard_scene_cut_tracking_confidence) or
+        options.hard_scene_cut_tracking_confidence <
+        options.low_confidence_threshold or
+        options.hard_scene_cut_tracking_confidence > 1 or
         !std.math.isFinite(options.hard_scene_cut_histogram_distance) or
         options.hard_scene_cut_histogram_distance <= 0 or
         options.hard_scene_cut_histogram_distance > 1 or
@@ -317,4 +339,64 @@ test "pixel difference detects a cut with an unchanged histogram" {
         difference.pixels,
         0.000001,
     );
+}
+
+fn testMotionEstimate(confidence: f32) motion.Estimate {
+    return .{
+        .transform = .{ .x = 18, .y = -4 },
+        .confidence = confidence,
+        .detected_points = 80,
+        .tracked_points = 72,
+        .inlier_points = 68,
+        .residual_px = 0.4,
+        .spatial_coverage = 0.8,
+    };
+}
+
+test "reliable global motion prevents a false pixel-only scene cut" {
+    const options = Options{};
+    try std.testing.expect(!classifySceneCut(
+        .{ .histogram = 0.08, .pixels = 0.82 },
+        testMotionEstimate(0.8),
+        options,
+    ));
+}
+
+test "pixel-only appearance change remains a cut without reliable tracking" {
+    const options = Options{};
+    const difference = FrameDifference{ .histogram = 0.08, .pixels = 0.82 };
+    try std.testing.expect(classifySceneCut(difference, null, options));
+    try std.testing.expect(classifySceneCut(
+        difference,
+        testMotionEstimate(options.hard_scene_cut_tracking_confidence - 0.01),
+        options,
+    ));
+}
+
+test "uncertain appearance change accepts moderately reliable tracking" {
+    const options = Options{};
+    try std.testing.expect(!classifySceneCut(
+        .{ .histogram = 0.08, .pixels = 0.35 },
+        testMotionEstimate(0.4),
+        options,
+    ));
+}
+
+test "hard histogram change remains a cut despite reliable tracking" {
+    const options = Options{};
+    try std.testing.expect(classifySceneCut(
+        .{ .histogram = 0.7, .pixels = 0.1 },
+        testMotionEstimate(0.9),
+        options,
+    ));
+}
+
+test "hard scene-cut tracking confidence cannot be lower than the baseline" {
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .low_confidence_threshold = 0.4,
+        .hard_scene_cut_tracking_confidence = 0.3,
+    }));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .hard_scene_cut_tracking_confidence = std.math.inf(f32),
+    }));
 }
