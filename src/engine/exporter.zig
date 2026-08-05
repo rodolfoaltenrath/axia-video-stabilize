@@ -126,6 +126,7 @@ const NativeExporter = struct {
             analysis.video_info.source,
             analysis.video_info.time_base,
             analysis.video_info.frame_rate,
+            analysis.video_info.color,
             options.encoder,
         );
         var encoder_open = true;

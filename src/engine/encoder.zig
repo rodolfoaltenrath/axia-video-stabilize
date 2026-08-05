@@ -58,6 +58,7 @@ const DisabledEncoder = struct {
         source_dimensions: decoder.Dimensions,
         time_base: types.Rational,
         frame_rate: ?types.Rational,
+        color_info: decoder.ColorInfo,
         options: Options,
     ) EncoderError!DisabledEncoder {
         _ = allocator;
@@ -65,6 +66,7 @@ const DisabledEncoder = struct {
         _ = source_dimensions;
         _ = time_base;
         _ = frame_rate;
+        _ = color_info;
         _ = options;
         return error.BackendNotEnabled;
     }
@@ -107,6 +109,7 @@ const NativeEncoder = struct {
         source_dimensions: decoder.Dimensions,
         time_base: types.Rational,
         frame_rate: ?types.Rational,
+        color_info: decoder.ColorInfo,
         options: Options,
     ) EncoderError!NativeEncoder {
         if (output_path.len == 0) return error.EmptyPath;
@@ -114,6 +117,7 @@ const NativeEncoder = struct {
             return error.InvalidDimensions;
         }
         try time_base.validate();
+        if (!color_info.isValid()) return error.InvalidOptions;
         if (options.crf > 51 or options.preset.len == 0 or
             options.gop_size == 0 or options.max_b_frames > 16)
         {
@@ -166,6 +170,13 @@ const NativeEncoder = struct {
         codec_context.width = @intCast(output_dimensions.width);
         codec_context.height = @intCast(output_dimensions.height);
         codec_context.pix_fmt = ffmpeg.AV_PIX_FMT_YUV420P;
+        codec_context.color_range = @intCast(color_info.range);
+        codec_context.color_primaries = @intCast(color_info.primaries);
+        codec_context.color_trc = @intCast(color_info.transfer);
+        codec_context.colorspace = @intCast(color_info.matrix);
+        codec_context.chroma_sample_location = @intCast(
+            color_info.chroma_location,
+        );
         codec_context.time_base = .{
             .num = time_base.numerator,
             .den = time_base.denominator,
@@ -309,6 +320,11 @@ const NativeEncoder = struct {
         frame.format = ffmpeg.AV_PIX_FMT_YUV420P;
         frame.width = @intCast(output_dimensions.width);
         frame.height = @intCast(output_dimensions.height);
+        frame.color_range = codec_context.color_range;
+        frame.color_primaries = codec_context.color_primaries;
+        frame.color_trc = codec_context.color_trc;
+        frame.colorspace = codec_context.colorspace;
+        frame.chroma_location = codec_context.chroma_sample_location;
         const frame_buffer_result = ffmpeg.av_frame_get_buffer(frame, 32);
         if (frame_buffer_result < 0) {
             logFfmpegError("alocando o frame do encoder", frame_buffer_result);
@@ -335,6 +351,22 @@ const NativeEncoder = struct {
             null,
         ) orelse return error.ScaleContextFailed;
         errdefer ffmpeg.sws_freeContext(sws_context);
+        const coefficients = ffmpeg.sws_getCoefficients(
+            decoder.swsMatrix(color_info.matrix, output_dimensions),
+        );
+        const output_is_full = color_info.range == ffmpeg.AVCOL_RANGE_JPEG;
+        if (ffmpeg.sws_setColorspaceDetails(
+            sws_context,
+            coefficients,
+            1,
+            coefficients,
+            @intFromBool(output_is_full),
+            0,
+            1 << 16,
+            1 << 16,
+        ) < 0) {
+            return error.ScaleContextFailed;
+        }
 
         return .{
             .output_context = output_context,

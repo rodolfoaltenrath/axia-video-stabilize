@@ -461,6 +461,7 @@ test "disabled native encoder fails explicitly" {
             .{ .numerator = 1, .denominator = 30 },
             .{ .numerator = 30, .denominator = 1 },
             .{},
+            .{},
         ),
     );
 }
@@ -623,6 +624,11 @@ test "decoder pixel formats report their storage width" {
         @as(usize, 4),
         decoder.PixelFormat.bgra8.bytesPerPixel(),
     );
+}
+
+test "decoder color metadata rejects negative identifiers" {
+    try std.testing.expect((decoder.ColorInfo{}).isValid());
+    try std.testing.expect(!(decoder.ColorInfo{ .matrix = -1 }).isValid());
 }
 
 test "feature grid covers non-divisible image dimensions exactly" {
@@ -1091,6 +1097,13 @@ test "native encoder and muxer produce a playable MP4 container" {
 
     const width = 64;
     const height = 48;
+    const color_info = decoder.ColorInfo{
+        .range = 1,
+        .primaries = 1,
+        .transfer = 1,
+        .matrix = 1,
+        .chroma_location = 1,
+    };
     var pixels: [width * height * 4]u8 = undefined;
     @memset(&pixels, 96);
     var video_encoder = try encoder.Encoder.create(
@@ -1099,6 +1112,7 @@ test "native encoder and muxer produce a playable MP4 container" {
         .{ .width = width, .height = height },
         .{ .numerator = 1, .denominator = 30 },
         .{ .numerator = 30, .denominator = 1 },
+        color_info,
         .{ .preset = "ultrafast" },
     );
     var encoder_open = true;
@@ -1120,6 +1134,34 @@ test "native encoder and muxer produce a playable MP4 container" {
     try video_encoder.finish();
     video_encoder.deinit();
     encoder_open = false;
+
+    var encoded_decoder = try decoder.Decoder.open(
+        std.testing.allocator,
+        encoded_path,
+        .{ .output_format = .bgra8 },
+    );
+    defer encoded_decoder.deinit();
+    try std.testing.expectEqual(
+        color_info.range,
+        encoded_decoder.info.color.range,
+    );
+    try std.testing.expectEqual(
+        color_info.primaries,
+        encoded_decoder.info.color.primaries,
+    );
+    try std.testing.expectEqual(
+        color_info.transfer,
+        encoded_decoder.info.color.transfer,
+    );
+    try std.testing.expectEqual(
+        color_info.matrix,
+        encoded_decoder.info.color.matrix,
+    );
+    const decoded_frame = (try encoded_decoder.readFrame()) orelse
+        return error.TestUnexpectedResult;
+    for (decoded_frame.pixels[0..3]) |channel| {
+        try std.testing.expect(channel >= 90 and channel <= 102);
+    }
 
     const mux_result = try muxer.Muxer.run(
         std.testing.allocator,
@@ -1187,8 +1229,14 @@ const RenderCounter = struct {
     fn onFrame(raw_context: ?*anyopaque, frame: renderer.Frame) bool {
         const self: *RenderCounter = @ptrCast(@alignCast(raw_context.?));
         self.frame_count += 1;
-        if (frame.pixels.len > 0) {
-            self.checksum +%= frame.pixels[frame.pixels.len / 2];
+        const pixel_count = frame.pixels.len / 4;
+        const step = @max(1, pixel_count / 64);
+        var pixel: usize = 0;
+        while (pixel < pixel_count) : (pixel += step) {
+            const offset = pixel * 4;
+            self.checksum +%= frame.pixels[offset];
+            self.checksum +%= frame.pixels[offset + 1];
+            self.checksum +%= frame.pixels[offset + 2];
         }
         return true;
     }

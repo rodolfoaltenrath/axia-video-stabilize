@@ -6,6 +6,7 @@ const ffmpeg = if (build_options.native_ffmpeg) @cImport({
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavformat/avformat.h");
     @cInclude("libavutil/avutil.h");
+    @cInclude("libavutil/pixdesc.h");
     @cInclude("libswscale/swscale.h");
 }) else struct {};
 
@@ -25,6 +26,7 @@ pub const DecoderError = error{
     DecodeFailed,
     MissingTimestamp,
     UnsupportedResolutionChange,
+    UnsupportedHdrTransfer,
     ConversionFailed,
 } || std.mem.Allocator.Error;
 
@@ -50,9 +52,29 @@ pub const Dimensions = struct {
     height: u32,
 };
 
+/// Raw H.273/FFmpeg color identifiers. Keeping the numeric identifiers allows
+/// uncommon primaries and transfer functions to survive the native pipeline
+/// without narrowing them to a small application-specific enum.
+pub const ColorInfo = struct {
+    range: i32 = 0,
+    primaries: i32 = 2,
+    transfer: i32 = 2,
+    matrix: i32 = 2,
+    chroma_location: i32 = 0,
+
+    pub fn isValid(self: ColorInfo) bool {
+        return self.range >= 0 and
+            self.primaries >= 0 and
+            self.transfer >= 0 and
+            self.matrix >= 0 and
+            self.chroma_location >= 0;
+    }
+};
+
 pub const VideoInfo = struct {
     source: Dimensions,
     analysis: Dimensions,
+    color: ColorInfo,
     time_base: types.Rational,
     frame_rate: ?types.Rational,
     duration_seconds: ?f64,
@@ -306,6 +328,15 @@ const NativeDecoder = struct {
             .info = .{
                 .source = source,
                 .analysis = analysis,
+                .color = .{
+                    .range = @intCast(codec_context.color_range),
+                    .primaries = @intCast(codec_context.color_primaries),
+                    .transfer = @intCast(codec_context.color_trc),
+                    .matrix = @intCast(codec_context.colorspace),
+                    .chroma_location = @intCast(
+                        codec_context.chroma_sample_location,
+                    ),
+                },
                 .time_base = time_base,
                 .frame_rate = frame_rate,
                 .duration_seconds = duration_seconds,
@@ -417,6 +448,29 @@ const NativeDecoder = struct {
             return error.ConversionFailed;
         };
         self.sws_context = cached_context;
+        const frame_color = ColorInfo{
+            .range = @intCast(self.frame.color_range),
+            .primaries = @intCast(self.frame.color_primaries),
+            .transfer = @intCast(self.frame.color_trc),
+            .matrix = @intCast(self.frame.colorspace),
+            .chroma_location = @intCast(self.frame.chroma_location),
+        };
+        if (isHdrTransfer(frame_color.transfer) or
+            isHdrTransfer(self.info.color.transfer))
+        {
+            std.log.err(
+                "FFmpeg: vídeo HDR requer tone mapping antes do encode H.264 SDR",
+                .{},
+            );
+            return error.UnsupportedHdrTransfer;
+        }
+        try configureColorConversion(
+            cached_context,
+            source_format,
+            frame_color,
+            self.info.color,
+            self.info.source,
+        );
 
         var destination_data = [_][*c]u8{
             self.output_pixels.ptr, null, null, null, null, null, null, null,
@@ -460,3 +514,108 @@ const NativeDecoder = struct {
         };
     }
 };
+
+fn configureColorConversion(
+    context: *ffmpeg.SwsContext,
+    source_format: ffmpeg.AVPixelFormat,
+    frame_color: ColorInfo,
+    stream_color: ColorInfo,
+    dimensions: Dimensions,
+) DecoderError!void {
+    const color = ColorInfo{
+        .range = preferSpecified(frame_color.range, stream_color.range, 0),
+        .primaries = preferSpecified(
+            frame_color.primaries,
+            stream_color.primaries,
+            2,
+        ),
+        .transfer = preferSpecified(
+            frame_color.transfer,
+            stream_color.transfer,
+            2,
+        ),
+        .matrix = preferSpecified(frame_color.matrix, stream_color.matrix, 2),
+        .chroma_location = preferSpecified(
+            frame_color.chroma_location,
+            stream_color.chroma_location,
+            0,
+        ),
+    };
+    const coefficients = ffmpeg.sws_getCoefficients(
+        swsMatrix(color.matrix, dimensions),
+    );
+    const descriptor = ffmpeg.av_pix_fmt_desc_get(source_format);
+    const source_is_rgb = descriptor != null and
+        (descriptor.*.flags & ffmpeg.AV_PIX_FMT_FLAG_RGB) != 0;
+    const source_is_full = color.range == ffmpeg.AVCOL_RANGE_JPEG or
+        source_is_rgb;
+    const result = ffmpeg.sws_setColorspaceDetails(
+        context,
+        coefficients,
+        @intFromBool(source_is_full),
+        coefficients,
+        1,
+        0,
+        1 << 16,
+        1 << 16,
+    );
+    if (result < 0) return error.ConversionFailed;
+}
+
+fn isHdrTransfer(transfer: i32) bool {
+    return transfer == ffmpeg.AVCOL_TRC_SMPTE2084 or
+        transfer == ffmpeg.AVCOL_TRC_ARIB_STD_B67;
+}
+
+fn preferSpecified(frame: i32, stream: i32, unspecified: i32) i32 {
+    if (frame != unspecified) return frame;
+    return stream;
+}
+
+pub fn swsMatrix(matrix: i32, dimensions: Dimensions) c_int {
+    return switch (matrix) {
+        ffmpeg.AVCOL_SPC_BT709 => ffmpeg.SWS_CS_ITU709,
+        ffmpeg.AVCOL_SPC_FCC => ffmpeg.SWS_CS_FCC,
+        ffmpeg.AVCOL_SPC_BT470BG,
+        ffmpeg.AVCOL_SPC_SMPTE170M,
+        => ffmpeg.SWS_CS_ITU601,
+        ffmpeg.AVCOL_SPC_SMPTE240M => ffmpeg.SWS_CS_SMPTE240M,
+        ffmpeg.AVCOL_SPC_BT2020_NCL,
+        ffmpeg.AVCOL_SPC_BT2020_CL,
+        => ffmpeg.SWS_CS_BT2020,
+        else => if (dimensions.width >= 1280 or dimensions.height > 576)
+            ffmpeg.SWS_CS_ITU709
+        else
+            ffmpeg.SWS_CS_DEFAULT,
+    };
+}
+
+test "HDR transfer functions require explicit tone mapping" {
+    if (!native_enabled) return error.SkipZigTest;
+    try std.testing.expect(isHdrTransfer(ffmpeg.AVCOL_TRC_SMPTE2084));
+    try std.testing.expect(isHdrTransfer(ffmpeg.AVCOL_TRC_ARIB_STD_B67));
+    try std.testing.expect(!isHdrTransfer(ffmpeg.AVCOL_TRC_BT709));
+}
+
+test "swscale matrix follows metadata and resolution fallback" {
+    if (!native_enabled) return error.SkipZigTest;
+    try std.testing.expectEqual(
+        @as(c_int, ffmpeg.SWS_CS_ITU709),
+        swsMatrix(ffmpeg.AVCOL_SPC_BT709, .{ .width = 720, .height = 576 }),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, ffmpeg.SWS_CS_BT2020),
+        swsMatrix(
+            ffmpeg.AVCOL_SPC_BT2020_NCL,
+            .{ .width = 3840, .height = 2160 },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, ffmpeg.SWS_CS_ITU709),
+        swsMatrix(2, .{ .width = 1920, .height = 1080 }),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, ffmpeg.SWS_CS_DEFAULT),
+        swsMatrix(2, .{ .width = 640, .height = 480 }),
+    );
+}
