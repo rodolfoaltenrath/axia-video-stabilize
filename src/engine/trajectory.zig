@@ -162,19 +162,21 @@ fn rejectIsolatedMotionSpikes(
             right.timestamp_seconds - left.timestamp_seconds,
             options,
         );
+        const left_agrees_with_current = ratesAreCompatible(
+            left_rate,
+            current_rate,
+            current.timestamp_seconds - left.timestamp_seconds,
+            options,
+        );
+        const current_agrees_with_right = ratesAreCompatible(
+            current_rate,
+            right_rate,
+            right.timestamp_seconds - current.timestamp_seconds,
+            options,
+        );
         if (!neighbours_agree or
-            ratesAreCompatible(
-                left_rate,
-                current_rate,
-                current.timestamp_seconds - left.timestamp_seconds,
-                options,
-            ) or
-            ratesAreCompatible(
-                current_rate,
-                right_rate,
-                right.timestamp_seconds - current.timestamp_seconds,
-                options,
-            ))
+            left_agrees_with_current or
+            current_agrees_with_right)
         {
             continue;
         }
@@ -461,4 +463,74 @@ fn transformFromPose(pose: Pose) types.SimilarityTransform {
         .angle = pose.angle,
         .scale = @exp(pose.log_scale),
     };
+}
+
+fn testMotionRecord(index: u64, translation_x: f64) types.AnalysisRecord {
+    return .{
+        .timing = .{
+            .index = index,
+            .pts = @intCast(index),
+            .time_base = .{ .numerator = 1, .denominator = 30 },
+        },
+        .global_motion_from_previous = .{ .x = translation_x },
+        .confidence = 1,
+    };
+}
+
+test "isolated confident motion spike is reconstructed from neighbours" {
+    const records = [_]types.AnalysisRecord{
+        types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = .{ .numerator = 1, .denominator = 30 },
+        }, 0),
+        testMotionRecord(1, 1),
+        testMotionRecord(2, 30),
+        testMotionRecord(3, 1),
+    };
+    const poses = try integrateAnalysis(std.testing.allocator, &records);
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 1), poses[1].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), poses[3].x, 0.000001);
+}
+
+test "sustained fast motion is not treated as an isolated spike" {
+    const records = [_]types.AnalysisRecord{
+        types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = .{ .numerator = 1, .denominator = 30 },
+        }, 0),
+        testMotionRecord(1, 1),
+        testMotionRecord(2, 30),
+        testMotionRecord(3, 30),
+    };
+    const poses = try integrateAnalysis(std.testing.allocator, &records);
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 31), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 61), poses[3].x, 0.000001);
+}
+
+test "isolated motion spike rejection can be disabled" {
+    const records = [_]types.AnalysisRecord{
+        types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = .{ .numerator = 1, .denominator = 30 },
+        }, 0),
+        testMotionRecord(1, 1),
+        testMotionRecord(2, 30),
+        testMotionRecord(3, 1),
+    };
+    const poses = try integrateAnalysisWithOptions(
+        std.testing.allocator,
+        &records,
+        .{ .reject_isolated_motion_spikes = false },
+    );
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 32), poses[3].x, 0.000001);
 }
