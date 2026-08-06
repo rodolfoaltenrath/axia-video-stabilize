@@ -155,13 +155,6 @@ const NativeProgress = struct {
         progress: engine.exporter.Progress,
     ) void {
         const self: *NativeProgress = @ptrCast(@alignCast(raw_context.?));
-        const total = @max(
-            progress.total_frames orelse 0,
-            @max(progress.processed_frames, 1),
-        );
-        const ratio: f32 =
-            @floatCast(@as(f64, @floatFromInt(progress.processed_frames)) /
-            @as(f64, @floatFromInt(total)));
         const phase: state_mod.Phase = switch (progress.stage) {
             .analyzing => .analyzing,
             .smoothing => .smoothing,
@@ -183,6 +176,26 @@ const NativeProgress = struct {
             .muxing => 0.99,
             .completed => 1.0,
         };
+        if (progress.stage == .muxing) {
+            const ratio = std.math.clamp(
+                progress.stage_progress orelse 0,
+                0,
+                1,
+            );
+            self.state.updateStageProgress(
+                phase,
+                start + (end - start) * ratio,
+            );
+            return;
+        }
+
+        const total = @max(
+            progress.total_frames orelse 0,
+            @max(progress.processed_frames, 1),
+        );
+        const ratio: f32 =
+            @floatCast(@as(f64, @floatFromInt(progress.processed_frames)) /
+            @as(f64, @floatFromInt(total)));
         const speed = self.measureSpeed(progress);
         self.state.updateFrameProgress(
             phase,

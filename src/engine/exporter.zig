@@ -20,6 +20,7 @@ pub const Progress = struct {
     stage: Stage,
     processed_frames: u64 = 0,
     total_frames: ?u64 = null,
+    stage_progress: ?f32 = null,
 };
 
 pub const Observer = struct {
@@ -163,15 +164,21 @@ const NativeExporter = struct {
         if (options.observer.isCancelled()) return error.Cancelled;
         options.observer.report(.{
             .stage = .muxing,
-            .processed_frames = @intCast(analysis.records.len),
-            .total_frames = @intCast(analysis.records.len),
+            .stage_progress = 0,
         });
+        var mux_observer = MuxObserver{ .observer = options.observer };
+        var mux_options = options.muxer;
+        mux_options.observer = .{
+            .context = &mux_observer,
+            .on_progress = MuxObserver.onProgress,
+            .should_cancel = MuxObserver.shouldCancel,
+        };
         const mux_result = try muxer.Muxer.run(
             allocator,
             video_temp_path,
             input_path,
             partial_path,
-            options.muxer,
+            mux_options,
         );
         if (options.observer.isCancelled()) return error.Cancelled;
 
@@ -190,6 +197,26 @@ const NativeExporter = struct {
             .frames = frame_count,
             .audio_streams = mux_result.audio_streams,
         };
+    }
+};
+
+const MuxObserver = struct {
+    observer: Observer,
+
+    fn onProgress(
+        raw_context: ?*anyopaque,
+        progress: muxer.Progress,
+    ) void {
+        const self: *MuxObserver = @ptrCast(@alignCast(raw_context.?));
+        self.observer.report(.{
+            .stage = .muxing,
+            .stage_progress = progress.ratio(),
+        });
+    }
+
+    fn shouldCancel(raw_context: ?*anyopaque) bool {
+        const self: *MuxObserver = @ptrCast(@alignCast(raw_context.?));
+        return self.observer.isCancelled();
     }
 };
 

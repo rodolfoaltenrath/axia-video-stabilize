@@ -224,6 +224,21 @@ pub const AppState = struct {
         self.setMessageLocked("");
     }
 
+    pub fn updateStageProgress(
+        self: *AppState,
+        phase: Phase,
+        progress: f32,
+    ) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.phase = phase;
+        self.progress = std.math.clamp(progress, 0.0, 1.0);
+        self.processed_frame = 0;
+        self.total_frames = null;
+        self.processing_speed = 0;
+        if (phase.isBusy()) self.setMessageLocked("");
+    }
+
     pub fn fail(self: *AppState, message: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();

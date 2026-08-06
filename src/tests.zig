@@ -111,6 +111,19 @@ test "muxing remains an active cancellable phase" {
     );
 }
 
+test "muxing progress clears frame-specific rendering metrics" {
+    var state = app_state.AppState{};
+    state.updateFrameProgress(.rendering, 0.8, 80, 100, 24);
+    state.updateStageProgress(.muxing, 0.97);
+
+    const snapshot = state.snapshot();
+    try std.testing.expectEqual(app_state.Phase.muxing, snapshot.phase);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.97), snapshot.progress, 0.000001);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.processed_frame);
+    try std.testing.expectEqual(@as(?u64, null), snapshot.total_frames);
+    try std.testing.expectEqual(@as(f32, 0), snapshot.processing_speed);
+}
+
 test "cancellation is accepted only for active processing" {
     var state = app_state.AppState{};
     state.requestCancel();
@@ -1357,8 +1370,16 @@ test "native encoder and muxer produce a playable MP4 container" {
     );
     defer std.testing.allocator.free(muxed_path);
     defer deleteTestFile(muxed_path);
+    const cancelled_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}.axia-cancelled-mux-test.mp4",
+        .{build_options.test_video},
+    );
+    defer std.testing.allocator.free(cancelled_path);
+    defer deleteTestFile(cancelled_path);
     deleteTestFile(encoded_path);
     deleteTestFile(muxed_path);
+    deleteTestFile(cancelled_path);
 
     const width = 64;
     const height = 48;
@@ -1428,12 +1449,23 @@ test "native encoder and muxer produce a playable MP4 container" {
         try std.testing.expect(channel >= 90 and channel <= 102);
     }
 
+    var progress_probe = MuxProgressProbe{};
     const mux_result = try muxer.Muxer.run(
         std.testing.allocator,
         encoded_path,
         build_options.test_video,
         muxed_path,
-        .{},
+        .{ .observer = .{
+            .context = &progress_probe,
+            .on_progress = MuxProgressProbe.onProgress,
+            .should_cancel = MuxProgressProbe.shouldCancel,
+        } },
+    );
+    try std.testing.expect(progress_probe.callbacks >= 2);
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 1),
+        progress_probe.last_ratio,
+        0.000001,
     );
     if (build_options.test_video_audio_streams > 0) {
         try std.testing.expectEqual(
@@ -1443,6 +1475,20 @@ test "native encoder and muxer produce a playable MP4 container" {
     }
     const stat = try std.fs.cwd().statFile(muxed_path);
     try std.testing.expect(stat.size > 0);
+
+    var cancellation_probe = MuxProgressProbe{ .cancel_on_progress = true };
+    try std.testing.expectError(error.Cancelled, muxer.Muxer.run(
+        std.testing.allocator,
+        encoded_path,
+        build_options.test_video,
+        cancelled_path,
+        .{ .observer = .{
+            .context = &cancellation_probe,
+            .on_progress = MuxProgressProbe.onProgress,
+            .should_cancel = MuxProgressProbe.shouldCancel,
+        } },
+    ));
+    try std.testing.expect(cancellation_probe.callbacks >= 1);
 }
 
 test "native exporter completes the full transactional pipeline" {
@@ -1504,6 +1550,25 @@ const RenderCounter = struct {
             self.checksum +%= frame.pixels[offset + 2];
         }
         return true;
+    }
+};
+
+const MuxProgressProbe = struct {
+    callbacks: u64 = 0,
+    last_ratio: f32 = 0,
+    cancel_on_progress: bool = false,
+    cancelled: bool = false,
+
+    fn onProgress(raw_context: ?*anyopaque, progress: muxer.Progress) void {
+        const self: *MuxProgressProbe = @ptrCast(@alignCast(raw_context.?));
+        self.callbacks += 1;
+        if (progress.ratio()) |ratio| self.last_ratio = ratio;
+        if (self.cancel_on_progress) self.cancelled = true;
+    }
+
+    fn shouldCancel(raw_context: ?*anyopaque) bool {
+        const self: *MuxProgressProbe = @ptrCast(@alignCast(raw_context.?));
+        return self.cancelled;
     }
 };
 

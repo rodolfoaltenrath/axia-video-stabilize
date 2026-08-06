@@ -10,10 +10,46 @@ const ffmpeg = if (build_options.native_ffmpeg) @cImport({
 
 pub const native_enabled = build_options.native_ffmpeg;
 
+pub const Progress = struct {
+    processed_packets: u64,
+    processed_seconds: f64,
+    total_seconds: ?f64,
+
+    pub fn ratio(self: Progress) ?f32 {
+        const total = self.total_seconds orelse return null;
+        if (!std.math.isFinite(self.processed_seconds) or
+            !std.math.isFinite(total) or total <= 0)
+        {
+            return null;
+        }
+        return @floatCast(std.math.clamp(
+            self.processed_seconds / total,
+            0,
+            1,
+        ));
+    }
+};
+
+pub const Observer = struct {
+    context: ?*anyopaque = null,
+    on_progress: ?*const fn (?*anyopaque, Progress) void = null,
+    should_cancel: ?*const fn (?*anyopaque) bool = null,
+
+    fn report(self: Observer, progress: Progress) void {
+        if (self.on_progress) |callback| callback(self.context, progress);
+    }
+
+    fn isCancelled(self: Observer) bool {
+        if (self.should_cancel) |callback| return callback(self.context);
+        return false;
+    }
+};
+
 pub const Options = struct {
     copy_metadata: bool = true,
     require_audio: bool = false,
     faststart: bool = true,
+    observer: Observer = .{},
 };
 
 pub const Result = struct {
@@ -39,6 +75,7 @@ pub const MuxError = error{
     PacketWriteFailed,
     TrailerWriteFailed,
     StreamIndexInvalid,
+    Cancelled,
 } || std.mem.Allocator.Error;
 
 pub const Muxer = if (native_enabled) NativeMuxer else DisabledMuxer;
@@ -73,6 +110,7 @@ const NativeMuxer = struct {
         {
             return error.EmptyPath;
         }
+        if (options.observer.isCancelled()) return error.Cancelled;
 
         var video_input = try openInput(
             allocator,
@@ -86,6 +124,12 @@ const NativeMuxer = struct {
             error.OpenSourceFailed,
         );
         defer closeInput(&source_input);
+        if (options.observer.isCancelled()) return error.Cancelled;
+
+        const total_duration_seconds = maximumDurationSeconds(
+            inputDurationSeconds(video_input),
+            inputDurationSeconds(source_input),
+        );
 
         const video_stream_index = ffmpeg.av_find_best_stream(
             video_input,
@@ -111,6 +155,11 @@ const NativeMuxer = struct {
         const output = output_optional orelse
             return error.OutputContextFailed;
         errdefer ffmpeg.avformat_free_context(output);
+        var io_observer = options.observer;
+        output.interrupt_callback = .{
+            .callback = interruptIo,
+            .@"opaque" = &io_observer,
+        };
 
         const input_video_stream =
             video_input.streams[@intCast(video_stream_index)];
@@ -248,11 +297,14 @@ const NativeMuxer = struct {
             _ = ffmpeg.avio_closep(&output.pb);
         };
         if ((output.oformat.*.flags & ffmpeg.AVFMT_NOFILE) == 0) {
-            if (ffmpeg.avio_open(
+            if (ffmpeg.avio_open2(
                 &output.pb,
                 output_path_z.ptr,
                 ffmpeg.AVIO_FLAG_WRITE,
+                &output.interrupt_callback,
+                null,
             ) < 0) {
+                if (options.observer.isCancelled()) return error.Cancelled;
                 return error.OutputOpenFailed;
             }
             io_open = true;
@@ -269,6 +321,7 @@ const NativeMuxer = struct {
             );
         }
         if (ffmpeg.avformat_write_header(output, &muxer_options) < 0) {
+            if (options.observer.isCancelled()) return error.Cancelled;
             return error.HeaderWriteFailed;
         }
 
@@ -289,13 +342,22 @@ const NativeMuxer = struct {
         var audio_ready = false;
         var video_eof = false;
         var audio_eof = false;
+        var processed_packets: u64 = 0;
+        var processed_seconds: f64 = 0;
+        options.observer.report(.{
+            .processed_packets = 0,
+            .processed_seconds = 0,
+            .total_seconds = total_duration_seconds,
+        });
         while (!video_eof or !audio_eof or video_ready or audio_ready) {
+            if (options.observer.isCancelled()) return error.Cancelled;
             if (!video_ready and !video_eof) {
                 video_ready = try readNextVideoPacket(
                     video_input,
                     video_stream_index,
                     video_packet,
                     &video_eof,
+                    options.observer,
                 );
             }
             if (!audio_ready and !audio_eof) {
@@ -304,6 +366,7 @@ const NativeMuxer = struct {
                     stream_mapping,
                     audio_packet,
                     &audio_eof,
+                    options.observer,
                 );
             }
             if (!video_ready and !audio_ready) continue;
@@ -322,12 +385,20 @@ const NativeMuxer = struct {
                     ].*.time_base,
                 );
             if (write_video) {
+                if (packetPositionSeconds(
+                    video_packet,
+                    input_video_stream.*.time_base,
+                    video_input.start_time,
+                )) |position| {
+                    processed_seconds = @max(processed_seconds, position);
+                }
                 try writePacket(
                     output,
                     video_packet,
                     input_video_stream.*.time_base,
                     output_video_stream.*.time_base,
                     output_video_stream.*.index,
+                    options.observer,
                 );
                 video_ready = false;
             } else {
@@ -341,18 +412,36 @@ const NativeMuxer = struct {
                 const output_index = stream_mapping[source_index];
                 const output_stream =
                     output.streams[@intCast(output_index)];
+                if (packetPositionSeconds(
+                    audio_packet,
+                    source_input.streams[source_index].*.time_base,
+                    source_input.start_time,
+                )) |position| {
+                    processed_seconds = @max(processed_seconds, position);
+                }
                 try writePacket(
                     output,
                     audio_packet,
                     source_input.streams[source_index].*.time_base,
                     output_stream.*.time_base,
                     output_index,
+                    options.observer,
                 );
                 audio_ready = false;
             }
+            processed_packets += 1;
+            if (processed_packets % 32 == 0) {
+                options.observer.report(.{
+                    .processed_packets = processed_packets,
+                    .processed_seconds = processed_seconds,
+                    .total_seconds = total_duration_seconds,
+                });
+            }
         }
 
+        if (options.observer.isCancelled()) return error.Cancelled;
         if (ffmpeg.av_write_trailer(output) < 0) {
+            if (options.observer.isCancelled()) return error.Cancelled;
             return error.TrailerWriteFailed;
         }
         if (io_open) {
@@ -360,9 +449,57 @@ const NativeMuxer = struct {
             io_open = false;
         }
         ffmpeg.avformat_free_context(output);
+        options.observer.report(.{
+            .processed_packets = processed_packets,
+            .processed_seconds = total_duration_seconds orelse
+                processed_seconds,
+            .total_seconds = total_duration_seconds,
+        });
         return .{ .audio_streams = audio_stream_count };
     }
 };
+
+fn inputDurationSeconds(context: *const ffmpeg.AVFormatContext) ?f64 {
+    if (context.duration <= 0 or context.duration == ffmpeg.AV_NOPTS_VALUE) {
+        return null;
+    }
+    const seconds = @as(f64, @floatFromInt(context.duration)) /
+        @as(f64, ffmpeg.AV_TIME_BASE);
+    return if (std.math.isFinite(seconds) and seconds > 0)
+        seconds
+    else
+        null;
+}
+
+fn maximumDurationSeconds(left: ?f64, right: ?f64) ?f64 {
+    if (left) |left_value| {
+        if (right) |right_value| return @max(left_value, right_value);
+        return left_value;
+    }
+    return right;
+}
+
+fn packetPositionSeconds(
+    packet: *const ffmpeg.AVPacket,
+    time_base: ffmpeg.AVRational,
+    input_start_time: i64,
+) ?f64 {
+    if (time_base.num <= 0 or time_base.den <= 0) return null;
+    const timestamp = packetTimestamp(packet);
+    if (timestamp == ffmpeg.AV_NOPTS_VALUE) return null;
+
+    const duration = @max(packet.duration, 0);
+    var seconds = (@as(f64, @floatFromInt(timestamp)) +
+        @as(f64, @floatFromInt(duration))) *
+        @as(f64, @floatFromInt(time_base.num)) /
+        @as(f64, @floatFromInt(time_base.den));
+    if (input_start_time != ffmpeg.AV_NOPTS_VALUE) {
+        seconds -= @as(f64, @floatFromInt(input_start_time)) /
+            @as(f64, ffmpeg.AV_TIME_BASE);
+    }
+    if (!std.math.isFinite(seconds)) return null;
+    return @max(0, seconds);
+}
 
 fn openInput(
     allocator: std.mem.Allocator,
@@ -402,8 +539,10 @@ fn readNextVideoPacket(
     video_stream_index: c_int,
     packet: *ffmpeg.AVPacket,
     eof: *bool,
+    observer: Observer,
 ) MuxError!bool {
     while (true) {
+        if (observer.isCancelled()) return error.Cancelled;
         const result = ffmpeg.av_read_frame(context, packet);
         if (result == ffmpeg.AVERROR_EOF) {
             eof.* = true;
@@ -420,8 +559,10 @@ fn readNextAudioPacket(
     stream_mapping: []const c_int,
     packet: *ffmpeg.AVPacket,
     eof: *bool,
+    observer: Observer,
 ) MuxError!bool {
     while (true) {
+        if (observer.isCancelled()) return error.Cancelled;
         const result = ffmpeg.av_read_frame(context, packet);
         if (result == ffmpeg.AVERROR_EOF) {
             eof.* = true;
@@ -467,6 +608,7 @@ fn writePacket(
     input_time_base: ffmpeg.AVRational,
     output_time_base: ffmpeg.AVRational,
     output_stream_index: c_int,
+    observer: Observer,
 ) MuxError!void {
     ffmpeg.av_packet_rescale_ts(
         packet,
@@ -480,6 +622,56 @@ fn writePacket(
     ffmpeg.av_packet_unref(packet);
 
     if (result < 0) {
+        if (observer.isCancelled()) return error.Cancelled;
         return error.PacketWriteFailed;
     }
+}
+
+fn interruptIo(raw_context: ?*anyopaque) callconv(.C) c_int {
+    const observer: *const Observer = @ptrCast(@alignCast(raw_context.?));
+    return if (observer.isCancelled()) 1 else 0;
+}
+
+fn testCancellation(raw_context: ?*anyopaque) bool {
+    const cancelled: *const bool = @ptrCast(@alignCast(raw_context.?));
+    return cancelled.*;
+}
+
+test "mux progress ratio is bounded and requires a duration" {
+    try std.testing.expectEqual(
+        @as(?f32, null),
+        (Progress{
+            .processed_packets = 10,
+            .processed_seconds = 2,
+            .total_seconds = null,
+        }).ratio(),
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 0.25),
+        (Progress{
+            .processed_packets = 10,
+            .processed_seconds = 2,
+            .total_seconds = 8,
+        }).ratio().?,
+        0.000001,
+    );
+    try std.testing.expectEqual(
+        @as(f32, 1),
+        (Progress{
+            .processed_packets = 10,
+            .processed_seconds = 12,
+            .total_seconds = 8,
+        }).ratio().?,
+    );
+}
+
+test "mux observer exposes cancellation state" {
+    var cancelled = false;
+    const observer = Observer{
+        .context = &cancelled,
+        .should_cancel = testCancellation,
+    };
+    try std.testing.expect(!observer.isCancelled());
+    cancelled = true;
+    try std.testing.expect(observer.isCancelled());
 }
