@@ -284,6 +284,8 @@ test "short low confidence gap is reconstructed using VFR timing" {
     try std.testing.expectApproxEqAbs(@as(f64, 1), poses[1].x, 0.000001);
     try std.testing.expectApproxEqAbs(@as(f64, 3), poses[2].x, 0.000001);
     try std.testing.expectApproxEqAbs(@as(f64, 4), poses[3].x, 0.000001);
+    try std.testing.expectEqual(@as(u32, 0), poses[2].segment);
+    try std.testing.expectEqual(@as(u32, 0), poses[3].segment);
 }
 
 test "short motion gap interpolates rotation and logarithmic scale" {
@@ -371,12 +373,15 @@ test "motion gap reconstruction does not cross scene cuts" {
     );
     defer std.testing.allocator.free(poses);
 
-    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), poses[2].x, 0.000001);
     try std.testing.expectApproxEqAbs(@as(f64, 0), poses[3].x, 0.000001);
     try std.testing.expectApproxEqAbs(@as(f64, 8), poses[4].x, 0.000001);
+    try std.testing.expectEqual(@as(u32, 1), poses[2].segment);
+    try std.testing.expectEqual(@as(u32, 2), poses[3].segment);
+    try std.testing.expectEqual(@as(u32, 2), poses[4].segment);
 }
 
-test "long motion gaps remain identity" {
+test "long motion gaps rebase trajectory before tracking resumes" {
     const time_base = engine_types.Rational{
         .numerator = 1,
         .denominator = 30,
@@ -414,8 +419,12 @@ test "long motion gaps remain identity" {
     );
     defer std.testing.allocator.free(poses);
 
-    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[5].x, 0.000001);
-    try std.testing.expectApproxEqAbs(@as(f64, 6), poses[6].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), poses[5].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 4), poses[6].x, 0.000001);
+    try std.testing.expectEqual(@as(u32, 0), poses[1].segment);
+    try std.testing.expectEqual(@as(u32, 1), poses[2].segment);
+    try std.testing.expectEqual(@as(u32, 1), poses[5].segment);
+    try std.testing.expectEqual(@as(u32, 2), poses[6].segment);
 }
 
 test "motion gap reconstruction respects acceleration limits" {
@@ -452,8 +461,10 @@ test "motion gap reconstruction respects acceleration limits" {
     );
     defer std.testing.allocator.free(poses);
 
-    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[2].x, 0.000001);
-    try std.testing.expectApproxEqAbs(@as(f64, 12), poses[3].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 10), poses[3].x, 0.000001);
+    try std.testing.expectEqual(@as(u32, 1), poses[2].segment);
+    try std.testing.expectEqual(@as(u32, 2), poses[3].segment);
 }
 
 test "motion gap reconstruction rejects invalid limits" {

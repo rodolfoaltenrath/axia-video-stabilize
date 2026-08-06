@@ -5,6 +5,7 @@ pub const TrajectoryError = error{
     InvalidIntegrationOptions,
     InvalidTrajectoryTimestamp,
     InvalidSmoothingWindow,
+    TrajectorySegmentOverflow,
 };
 
 pub const IntegrationOptions = struct {
@@ -12,6 +13,8 @@ pub const IntegrationOptions = struct {
     maximum_interpolated_gap_frames: u8 = 3,
     /// Rejects one-frame motion impulses only when both neighbours agree.
     reject_isolated_motion_spikes: bool = true,
+    /// Starts neutral smoothing/crop segments around gaps that remain unknown.
+    rebase_unresolved_gaps: bool = true,
     /// Maximum change in pairwise translation velocity, in analysis pixels/s².
     maximum_translation_acceleration: f64 = 20_000,
     /// Maximum change in pairwise angular velocity, in radians/s².
@@ -95,10 +98,39 @@ pub fn integrateAnalysisWithOptions(
     interpolateShortGaps(samples, options);
 
     var current = types.SimilarityTransform.identity();
+    var trajectory_segment: u32 = 0;
+    var inside_unresolved_gap = false;
     for (records, samples, poses, 0..) |record, sample, *pose, index| {
-        if (index == 0 or record.flags.scene_cut) {
+        if (index == 0) {
             current = types.SimilarityTransform.identity();
+        } else if (record.flags.scene_cut) {
+            current = types.SimilarityTransform.identity();
+            inside_unresolved_gap = false;
+            trajectory_segment = std.math.add(
+                u32,
+                trajectory_segment,
+                1,
+            ) catch return error.TrajectorySegmentOverflow;
+        } else if (options.rebase_unresolved_gaps and !sample.reliable) {
+            if (!inside_unresolved_gap) {
+                current = types.SimilarityTransform.identity();
+                inside_unresolved_gap = true;
+                trajectory_segment = std.math.add(
+                    u32,
+                    trajectory_segment,
+                    1,
+                ) catch return error.TrajectorySegmentOverflow;
+            }
         } else {
+            if (options.rebase_unresolved_gaps and inside_unresolved_gap) {
+                current = types.SimilarityTransform.identity();
+                inside_unresolved_gap = false;
+                trajectory_segment = std.math.add(
+                    u32,
+                    trajectory_segment,
+                    1,
+                ) catch return error.TrajectorySegmentOverflow;
+            }
             current = compose(
                 sample.transform,
                 current,
@@ -107,7 +139,7 @@ pub fn integrateAnalysisWithOptions(
         pose.* = poseFromTransform(
             current,
             record.confidence,
-            record.scene_id,
+            trajectory_segment,
             sample.timestamp_seconds,
         );
     }
@@ -245,6 +277,7 @@ fn interpolateShortGaps(
                 interpolateRate(left_rate, right_rate, amount),
                 sample.duration_seconds,
             );
+            sample.reliable = true;
         }
     }
 }
@@ -533,4 +566,34 @@ test "isolated motion spike rejection can be disabled" {
     defer std.testing.allocator.free(poses);
 
     try std.testing.expectApproxEqAbs(@as(f64, 32), poses[3].x, 0.000001);
+}
+
+test "rebasing around unresolved gaps can be disabled" {
+    var missing = testMotionRecord(2, 100);
+    missing.confidence = 0;
+    missing.flags = .{ .low_confidence = true, .fallback = true };
+    const records = [_]types.AnalysisRecord{
+        types.AnalysisRecord.reference(.{
+            .index = 0,
+            .pts = 0,
+            .time_base = .{ .numerator = 1, .denominator = 30 },
+        }, 0),
+        testMotionRecord(1, 1),
+        missing,
+        testMotionRecord(3, 1),
+    };
+    const poses = try integrateAnalysisWithOptions(
+        std.testing.allocator,
+        &records,
+        .{
+            .maximum_interpolated_gap_frames = 0,
+            .rebase_unresolved_gaps = false,
+        },
+    );
+    defer std.testing.allocator.free(poses);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 1), poses[2].x, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), poses[3].x, 0.000001);
+    try std.testing.expectEqual(@as(u32, 0), poses[2].segment);
+    try std.testing.expectEqual(@as(u32, 0), poses[3].segment);
 }
