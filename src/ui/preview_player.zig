@@ -6,6 +6,10 @@ const max_preview_width: u32 = 960;
 const max_preview_height: u32 = 540;
 const max_preview_fps: f64 = 60;
 const bytes_per_pixel: usize = 4;
+const preview_pipe_poll_interval = 100 * std.time.ns_per_ms;
+
+const PreviewPipe = enum { stdout };
+const FrameReadResult = enum { frame, eof, cancelled };
 
 pub const View = struct {
     texture: ?rl.Texture2D = null,
@@ -225,6 +229,34 @@ pub const Player = struct {
         self.thread = null;
     }
 
+    fn cancellationRequested(self: *Player) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.cancel_requested;
+    }
+
+    fn readFrameInterruptibly(
+        self: *Player,
+        poller: anytype,
+        destination: []u8,
+    ) !FrameReadResult {
+        // A bounded poll lets stopDecoder wake this thread before joining it,
+        // even when FFmpeg has not produced enough bytes for a complete frame.
+        var offset: usize = 0;
+        while (offset < destination.len) {
+            const fifo = poller.fifo(.stdout);
+            offset += fifo.read(destination[offset..]);
+            if (offset == destination.len) return .frame;
+            if (self.cancellationRequested()) return .cancelled;
+
+            const pipe_open = try poller.pollTimeout(preview_pipe_poll_interval);
+            if (!pipe_open and poller.fifo(.stdout).count == 0) {
+                return if (offset == 0) .eof else error.EndOfStream;
+            }
+        }
+        return .frame;
+    }
+
     fn releaseMedia(self: *Player) void {
         self.stopDecoder();
         if (self.texture) |texture| rl.unloadTexture(texture);
@@ -321,34 +353,40 @@ pub const Player = struct {
         };
 
         const stdout = child.stdout orelse return error.MissingPreviewPipe;
-        var reader = stdout.reader();
-        while (true) {
-            self.mutex.lock();
-            while (self.frame_ready and !self.cancel_requested) {
-                self.frame_consumed.wait(&self.mutex);
-            }
-            const cancelled = self.cancel_requested;
-            self.mutex.unlock();
-            if (cancelled) {
-                _ = try child.kill();
-                child_terminated = true;
-                return;
-            }
+        const decode_result: FrameReadResult = decode: {
+            var poller = std.io.poll(self.allocator, PreviewPipe, .{ .stdout = stdout });
+            defer poller.deinit();
+            try poller.fifo(.stdout).ensureUnusedCapacity(self.pixels.?.len);
 
-            reader.readNoEof(self.pixels.?) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => return err,
-            };
-
-            self.mutex.lock();
-            if (self.cancel_requested) {
+            while (true) {
+                self.mutex.lock();
+                while (self.frame_ready and !self.cancel_requested) {
+                    self.frame_consumed.wait(&self.mutex);
+                }
+                const cancelled = self.cancel_requested;
                 self.mutex.unlock();
-                _ = try child.kill();
-                child_terminated = true;
-                return;
+                if (cancelled) break :decode .cancelled;
+
+                switch (try self.readFrameInterruptibly(&poller, self.pixels.?)) {
+                    .eof => break :decode .eof,
+                    .cancelled => break :decode .cancelled,
+                    .frame => {},
+                }
+
+                self.mutex.lock();
+                if (self.cancel_requested) {
+                    self.mutex.unlock();
+                    break :decode .cancelled;
+                }
+                self.frame_ready = true;
+                self.mutex.unlock();
             }
-            self.frame_ready = true;
-            self.mutex.unlock();
+        };
+
+        if (decode_result == .cancelled) {
+            _ = try child.kill();
+            child_terminated = true;
+            return;
         }
 
         const term = try child.wait();
