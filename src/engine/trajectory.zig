@@ -10,6 +10,8 @@ pub const TrajectoryError = error{
 pub const IntegrationOptions = struct {
     /// Zero disables reconstruction. Gaps need reliable samples on both sides.
     maximum_interpolated_gap_frames: u8 = 3,
+    /// Rejects one-frame motion impulses only when both neighbours agree.
+    reject_isolated_motion_spikes: bool = true,
     /// Maximum change in pairwise translation velocity, in analysis pixels/s².
     maximum_translation_acceleration: f64 = 20_000,
     /// Maximum change in pairwise angular velocity, in radians/s².
@@ -87,6 +89,9 @@ pub fn integrateAnalysisWithOptions(
         };
     }
     try validator.finish(@intCast(records.len));
+    if (options.reject_isolated_motion_spikes) {
+        rejectIsolatedMotionSpikes(samples, options);
+    }
     interpolateShortGaps(samples, options);
 
     var current = types.SimilarityTransform.identity();
@@ -124,6 +129,60 @@ const MotionRate = struct {
     angle: f64,
     log_scale: f64,
 };
+
+/// Converts a confident but temporally implausible one-frame impulse into a
+/// gap. `interpolateShortGaps` can then rebuild it from the agreeing samples
+/// on both sides. Real starts or stops are retained because their neighbours
+/// do not agree with each other.
+fn rejectIsolatedMotionSpikes(
+    samples: []PairwiseSample,
+    options: IntegrationOptions,
+) void {
+    if (samples.len < 4) return;
+
+    var index: usize = 2;
+    while (index + 1 < samples.len) : (index += 1) {
+        const left = samples[index - 1];
+        const current = samples[index];
+        const right = samples[index + 1];
+        if (!left.reliable or !current.reliable or !right.reliable or
+            left.scene_cut or current.scene_cut or right.scene_cut or
+            left.scene_id != current.scene_id or
+            current.scene_id != right.scene_id)
+        {
+            continue;
+        }
+
+        const left_rate = motionRate(left);
+        const current_rate = motionRate(current);
+        const right_rate = motionRate(right);
+        const neighbours_agree = ratesAreCompatible(
+            left_rate,
+            right_rate,
+            right.timestamp_seconds - left.timestamp_seconds,
+            options,
+        );
+        if (!neighbours_agree or
+            ratesAreCompatible(
+                left_rate,
+                current_rate,
+                current.timestamp_seconds - left.timestamp_seconds,
+                options,
+            ) or
+            ratesAreCompatible(
+                current_rate,
+                right_rate,
+                right.timestamp_seconds - current.timestamp_seconds,
+                options,
+            ))
+        {
+            continue;
+        }
+
+        samples[index].transform = types.SimilarityTransform.identity();
+        samples[index].reliable = false;
+    }
+}
 
 fn interpolateShortGaps(
     samples: []PairwiseSample,

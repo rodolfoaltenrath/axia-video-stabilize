@@ -12,6 +12,8 @@ pub const Options = struct {
     max_zoom: f64 = 1.5,
     extra_crop_fraction: f64 = 0,
     dynamic_window_seconds: f64 = 0.5,
+    /// Maximum perceptual zoom change in log(zoom) units per second.
+    dynamic_zoom_rate_per_second: f64 = 1.0,
     correction_strength_rate_per_second: f64 = 2.0,
     edge_margin_pixels: f64 = 0,
     search_iterations: u8 = 40,
@@ -89,13 +91,20 @@ pub fn plan(
 
     switch (options.mode) {
         .static => applyStatic(requirements, poses, output),
-        .dynamic => try applyDynamic(
-            allocator,
-            requirements,
-            poses,
-            options.dynamic_window_seconds,
-            output,
-        ),
+        .dynamic => {
+            try applyDynamic(
+                allocator,
+                requirements,
+                poses,
+                options.dynamic_window_seconds,
+                output,
+            );
+            limitDynamicZoomRate(
+                poses,
+                options.dynamic_zoom_rate_per_second,
+                output,
+            );
+        },
     }
 
     for (output) |*frame| {
@@ -384,6 +393,52 @@ fn applyDynamic(
     }
 }
 
+/// Builds the smallest scene-local envelope whose logarithmic zoom cannot
+/// change faster than `rate_per_second`. Both passes only raise the planned
+/// zoom, so the crop never falls below a frame's safety requirement.
+fn limitDynamicZoomRate(
+    poses: []const trajectory.Pose,
+    rate_per_second: f64,
+    output: []Frame,
+) void {
+    var scene_start: usize = 0;
+    while (scene_start < output.len) {
+        var scene_end = scene_start + 1;
+        while (scene_end < output.len and
+            poses[scene_end].segment == poses[scene_start].segment)
+        {
+            scene_end += 1;
+        }
+
+        var index = scene_end - 1;
+        while (index > scene_start) {
+            const previous = index - 1;
+            const elapsed = poses[index].timestamp_seconds -
+                poses[previous].timestamp_seconds;
+            const anticipated_log_zoom = @log(output[index].zoom) -
+                rate_per_second * elapsed;
+            output[previous].zoom = @max(
+                output[previous].zoom,
+                @exp(anticipated_log_zoom),
+            );
+            index = previous;
+        }
+
+        for (scene_start + 1..scene_end) |current| {
+            const previous = current - 1;
+            const elapsed = poses[current].timestamp_seconds -
+                poses[previous].timestamp_seconds;
+            const retained_log_zoom = @log(output[previous].zoom) -
+                rate_per_second * elapsed;
+            output[current].zoom = @max(
+                output[current].zoom,
+                @exp(retained_log_zoom),
+            );
+        }
+        scene_start = scene_end;
+    }
+}
+
 fn validateOptions(
     width: u32,
     height: u32,
@@ -399,6 +454,8 @@ fn validateOptions(
         options.extra_crop_fraction > 0.5 or
         !std.math.isFinite(options.dynamic_window_seconds) or
         options.dynamic_window_seconds < 0 or
+        !std.math.isFinite(options.dynamic_zoom_rate_per_second) or
+        options.dynamic_zoom_rate_per_second <= 0 or
         !std.math.isFinite(options.correction_strength_rate_per_second) or
         options.correction_strength_rate_per_second <= 0 or
         !std.math.isFinite(options.edge_margin_pixels) or
@@ -408,6 +465,124 @@ fn validateOptions(
     {
         return error.InvalidOptions;
     }
+}
+
+test "dynamic zoom rate is limited without violating requirements" {
+    const poses = [_]trajectory.Pose{
+        .{ .timestamp_seconds = 0.0 },
+        .{ .timestamp_seconds = 0.1 },
+        .{ .timestamp_seconds = 0.2 },
+        .{ .timestamp_seconds = 0.3 },
+        .{ .timestamp_seconds = 0.4 },
+    };
+    const original = [_]Frame{
+        .{ .zoom = 1, .required_zoom = 1, .limited = false },
+        .{ .zoom = 1, .required_zoom = 1, .limited = false },
+        .{ .zoom = 1.5, .required_zoom = 1.5, .limited = false },
+        .{ .zoom = 1, .required_zoom = 1, .limited = false },
+        .{ .zoom = 1, .required_zoom = 1, .limited = false },
+    };
+    var frames = original;
+    const rate = 0.8;
+    limitDynamicZoomRate(&poses, rate, &frames);
+
+    for (frames, original) |frame, requirement| {
+        try std.testing.expect(frame.zoom >= requirement.zoom);
+    }
+    for (frames[1..], frames[0 .. frames.len - 1], poses[1..], poses[0 .. poses.len - 1]) |
+        current,
+        previous,
+        current_pose,
+        previous_pose,
+    | {
+        const elapsed = current_pose.timestamp_seconds -
+            previous_pose.timestamp_seconds;
+        try std.testing.expect(
+            @abs(@log(current.zoom) - @log(previous.zoom)) <=
+                rate * elapsed + 0.000001,
+        );
+    }
+    try std.testing.expect(frames[0].zoom < frames[1].zoom);
+    try std.testing.expect(frames[3].zoom > frames[4].zoom);
+}
+
+test "dynamic crop plan applies the configured zoom rate" {
+    const corrections = [_]trajectory.Correction{
+        .{},
+        .{},
+        .{ .x = 10 },
+        .{},
+        .{},
+    };
+    const poses = [_]trajectory.Pose{
+        .{ .timestamp_seconds = 0.0 },
+        .{ .timestamp_seconds = 0.1 },
+        .{ .timestamp_seconds = 0.2 },
+        .{ .timestamp_seconds = 0.3 },
+        .{ .timestamp_seconds = 0.4 },
+    };
+    const rate = 0.8;
+    const frames = try plan(
+        std.testing.allocator,
+        &corrections,
+        &poses,
+        100,
+        100,
+        .{
+            .max_zoom = 2,
+            .dynamic_window_seconds = 0,
+            .dynamic_zoom_rate_per_second = rate,
+        },
+    );
+    defer std.testing.allocator.free(frames);
+
+    for (frames, poses, 0..) |frame, pose, index| {
+        try std.testing.expect(frame.zoom >= frame.required_zoom);
+        if (index == 0) continue;
+        const elapsed = pose.timestamp_seconds -
+            poses[index - 1].timestamp_seconds;
+        try std.testing.expect(
+            @abs(@log(frame.zoom) - @log(frames[index - 1].zoom)) <=
+                rate * elapsed + 0.000001,
+        );
+    }
+    try std.testing.expect(frames[0].zoom < frames[1].zoom);
+    try std.testing.expect(frames[3].zoom > frames[4].zoom);
+}
+
+test "dynamic zoom rate limiter does not cross scene cuts" {
+    const poses = [_]trajectory.Pose{
+        .{ .timestamp_seconds = 0.0, .segment = 0 },
+        .{ .timestamp_seconds = 0.1, .segment = 0 },
+        .{ .timestamp_seconds = 0.2, .segment = 1 },
+        .{ .timestamp_seconds = 0.3, .segment = 1 },
+    };
+    var frames = [_]Frame{
+        .{ .zoom = 1, .required_zoom = 1, .limited = false },
+        .{ .zoom = 1.5, .required_zoom = 1.5, .limited = false },
+        .{ .zoom = 1, .required_zoom = 1, .limited = false },
+        .{ .zoom = 1, .required_zoom = 1, .limited = false },
+    };
+    limitDynamicZoomRate(&poses, 0.8, &frames);
+
+    try std.testing.expect(frames[0].zoom > 1);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), frames[2].zoom, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), frames[3].zoom, 0.000001);
+}
+
+test "dynamic zoom rate must be finite and positive" {
+    try std.testing.expectError(error.InvalidOptions, requiredZoom(
+        .{},
+        100,
+        100,
+        .{ .dynamic_zoom_rate_per_second = 0 },
+    ));
+    try std.testing.expectError(error.InvalidOptions, requiredZoom(
+        .{},
+        100,
+        100,
+        .{ .dynamic_zoom_rate_per_second = std.math.inf(f64) },
+    ));
 }
 
 fn validatePoseOrder(
