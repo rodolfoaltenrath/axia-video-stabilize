@@ -504,6 +504,32 @@ test "low confidence pose has little influence on smoothing" {
     try std.testing.expect(smoothed[1].x < 1);
 }
 
+test "smoothing preserves constant camera velocity at scene edges" {
+    const poses = [_]trajectory.Pose{
+        .{ .timestamp_seconds = 0.0 },
+        .{ .x = 2, .y = -1, .angle = 0.005, .log_scale = 0.001, .timestamp_seconds = 0.1 },
+        .{ .x = 8, .y = -4, .angle = 0.020, .log_scale = 0.004, .timestamp_seconds = 0.4 },
+        .{ .x = 20, .y = -10, .angle = 0.050, .log_scale = 0.010, .timestamp_seconds = 1.0 },
+    };
+    const smoothed = try trajectory.smoothTimed(
+        std.testing.allocator,
+        &poses,
+        0.5,
+    );
+    defer std.testing.allocator.free(smoothed);
+
+    for (poses, smoothed) |raw, smooth| {
+        try std.testing.expectApproxEqAbs(raw.x, smooth.x, 0.000001);
+        try std.testing.expectApproxEqAbs(raw.y, smooth.y, 0.000001);
+        try std.testing.expectApproxEqAbs(raw.angle, smooth.angle, 0.000001);
+        try std.testing.expectApproxEqAbs(
+            raw.log_scale,
+            smooth.log_scale,
+            0.000001,
+        );
+    }
+}
+
 test "frame corrections include inverse scale delta" {
     const raw = [_]trajectory.Pose{
         .{ .x = 4, .y = -2, .angle = 0.2, .log_scale = @log(2.0) },
@@ -526,7 +552,7 @@ test "frame corrections include inverse scale delta" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), corrections[0].scale, 0.000001);
 }
 
-test "native trajectory uses presentation time for VFR smoothing" {
+test "VFR smoothing excludes distant samples without bending local motion" {
     const poses = [_]trajectory.Pose{
         .{ .x = 0, .timestamp_seconds = 0 },
         .{ .x = 10, .timestamp_seconds = 0.1 },
@@ -539,8 +565,16 @@ test "native trajectory uses presentation time for VFR smoothing" {
     );
     defer std.testing.allocator.free(smoothed);
 
-    try std.testing.expect(smoothed[0].x > 0);
-    try std.testing.expect(smoothed[0].x < 10);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 0),
+        smoothed[0].x,
+        0.000001,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 10),
+        smoothed[1].x,
+        0.000001,
+    );
     try std.testing.expectApproxEqAbs(
         @as(f64, 100),
         smoothed[2].x,

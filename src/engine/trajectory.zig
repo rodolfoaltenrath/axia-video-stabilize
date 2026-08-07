@@ -349,8 +349,60 @@ fn validateIntegrationOptions(options: IntegrationOptions) TrajectoryError!void 
     }
 }
 
-/// Timestamp-aware smoothing for the native pipeline. `radius_seconds` has the
-/// same meaning for CFR and VFR media because distances come from frame PTS.
+const LocalLinearFit = struct {
+    weight: f64 = 0,
+    weighted_time: f64 = 0,
+    weighted_time_squared: f64 = 0,
+    weighted_x: f64 = 0,
+    weighted_time_x: f64 = 0,
+    weighted_y: f64 = 0,
+    weighted_time_y: f64 = 0,
+    weighted_angle: f64 = 0,
+    weighted_time_angle: f64 = 0,
+    weighted_log_scale: f64 = 0,
+    weighted_time_log_scale: f64 = 0,
+
+    fn add(self: *LocalLinearFit, time: f64, pose: Pose, sample_weight: f64) void {
+        self.weight += sample_weight;
+        self.weighted_time += sample_weight * time;
+        self.weighted_time_squared += sample_weight * time * time;
+        self.weighted_x += sample_weight * pose.x;
+        self.weighted_time_x += sample_weight * time * pose.x;
+        self.weighted_y += sample_weight * pose.y;
+        self.weighted_time_y += sample_weight * time * pose.y;
+        self.weighted_angle += sample_weight * pose.angle;
+        self.weighted_time_angle += sample_weight * time * pose.angle;
+        self.weighted_log_scale += sample_weight * pose.log_scale;
+        self.weighted_time_log_scale += sample_weight * time * pose.log_scale;
+    }
+
+    fn estimateAtCenter(
+        self: LocalLinearFit,
+        weighted_value: f64,
+        weighted_time_value: f64,
+    ) f64 {
+        const determinant = self.weight * self.weighted_time_squared -
+            self.weighted_time * self.weighted_time;
+        const determinant_scale = @max(
+            1.0,
+            @abs(self.weight * self.weighted_time_squared) +
+                @abs(self.weighted_time * self.weighted_time),
+        );
+        if (@abs(determinant) <=
+            64.0 * std.math.floatEps(f64) * determinant_scale)
+        {
+            return weighted_value / self.weight;
+        }
+        return (self.weighted_time_squared * weighted_value -
+            self.weighted_time * weighted_time_value) / determinant;
+    }
+};
+
+/// Timestamp-aware local-linear Gaussian smoothing for the native pipeline.
+/// The fitted slope prevents a steady pan, rotation or zoom from bending near
+/// scene boundaries where a simple weighted average has samples on one side.
+/// `radius_seconds` has the same meaning for CFR and VFR media because all
+/// distances come from frame PTS.
 pub fn smoothTimed(
     allocator: std.mem.Allocator,
     poses: []const Pose,
@@ -368,12 +420,7 @@ pub fn smoothTimed(
 
     const sigma = @max(0.001, radius_seconds / 2.0);
     for (poses, 0..) |pose, index| {
-        var sum_x: f64 = 0;
-        var sum_y: f64 = 0;
-        var sum_angle_x: f64 = 0;
-        var sum_angle_y: f64 = 0;
-        var sum_log_scale: f64 = 0;
-        var sum_weight: f64 = 0;
+        var fit = LocalLinearFit{};
 
         var sample_index = index;
         while (sample_index > 0 and
@@ -401,19 +448,24 @@ pub fn smoothTimed(
                 @as(f64, @floatCast(sample.confidence)),
             );
             const weight = temporal_weight * confidence_weight;
-            sum_x += sample.x * weight;
-            sum_y += sample.y * weight;
-            sum_angle_x += @cos(sample.angle) * weight;
-            sum_angle_y += @sin(sample.angle) * weight;
-            sum_log_scale += sample.log_scale * weight;
-            sum_weight += weight;
+            fit.add(
+                sample.timestamp_seconds - pose.timestamp_seconds,
+                sample,
+                weight,
+            );
         }
 
         output[index] = .{
-            .x = sum_x / sum_weight,
-            .y = sum_y / sum_weight,
-            .angle = std.math.atan2(sum_angle_y, sum_angle_x),
-            .log_scale = sum_log_scale / sum_weight,
+            .x = fit.estimateAtCenter(fit.weighted_x, fit.weighted_time_x),
+            .y = fit.estimateAtCenter(fit.weighted_y, fit.weighted_time_y),
+            .angle = fit.estimateAtCenter(
+                fit.weighted_angle,
+                fit.weighted_time_angle,
+            ),
+            .log_scale = fit.estimateAtCenter(
+                fit.weighted_log_scale,
+                fit.weighted_time_log_scale,
+            ),
             .confidence = pose.confidence,
             .segment = pose.segment,
             .timestamp_seconds = pose.timestamp_seconds,
