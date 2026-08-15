@@ -76,6 +76,18 @@ The same pipeline is also available without the graphical window:
 zig build cli -- input.mp4 output.mp4
 ```
 
+To generate a frame-by-frame diagnostic report alongside the export:
+
+```text
+zig build cli -- input.mp4 output.mp4 --diagnostics diagnostics.csv
+```
+
+The CSV includes tracking confidence, detected/tracked/inlier point counts,
+residual and spatial coverage, scene/fallback flags, measured motion, raw and
+smoothed trajectories, final correction and crop/zoom limits. The report is
+optional and is written transactionally, so an interrupted write does not
+publish a partial CSV.
+
 There is no legacy backend or backend selection flag. Export currently stream
 copies source audio tracks into MP4; inputs whose audio codec is not accepted by
 the MP4 muxer fail explicitly instead of losing audio.

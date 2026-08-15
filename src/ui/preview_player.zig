@@ -1,10 +1,10 @@
 const std = @import("std");
 const rl = @import("raylib");
+const media = @import("../core/media.zig");
 const decoder_mod = @import("../engine/decoder.zig");
 
 const max_preview_width: u32 = 960;
 const max_preview_height: u32 = 540;
-const max_preview_fps: f64 = 60;
 const bytes_per_pixel: usize = 4;
 const preview_pipe_poll_interval = 100 * std.time.ns_per_ms;
 
@@ -75,11 +75,15 @@ pub const Player = struct {
         defer metadata_decoder.deinit();
         const info = metadata_decoder.info;
 
-        // --- A MÁGICA DO KISS AQUI ---
-        // Alocamos a textura sempre no tamanho máximo. O FFmpeg fará o fit
-        // internamente e preencherá as bordas com transparência.
-        self.width = max_preview_width;
-        self.height = max_preview_height;
+        const display_dimensions = info.displayDimensions();
+        const preview_size = media.fitPreviewSize(
+            display_dimensions.width,
+            display_dimensions.height,
+            max_preview_width,
+            max_preview_height,
+        );
+        self.width = preview_size.width;
+        self.height = preview_size.height;
 
         const pixel_count = std.math.mul(usize, self.width, self.height) catch
             return error.PreviewTooLarge;
@@ -92,7 +96,7 @@ pub const Player = struct {
         const image = rl.genImageColor(
             @intCast(self.width),
             @intCast(self.height),
-            rl.Color.blank, // Fundo da textura totalmente transparente!
+            rl.Color.black,
         );
         defer rl.unloadImage(image);
         self.texture = try rl.loadTextureFromImage(image);
@@ -106,7 +110,7 @@ pub const Player = struct {
                 info.duration_seconds.?
         else
             30;
-        self.fps = @min(max_preview_fps, fps);
+        self.fps = media.fitPreviewFrameRate(fps);
         self.duration_seconds = info.duration_seconds orelse
             if (info.estimated_frame_count) |count|
             @as(f64, @floatFromInt(count)) / fps
@@ -307,12 +311,10 @@ pub const Player = struct {
         const seek_text = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{start_seconds});
         defer self.allocator.free(seek_text);
 
-        // Scale com force_original_aspect_ratio reduz o vídeo para caber dentro das medidas
-        // Pad preenche o restante das medidas finais para não distorcer. color=black@0 é invisível.
         const scale_filter = try std.fmt.allocPrint(
             self.allocator,
-            "fps={d:.6},scale={d}:{d}:force_original_aspect_ratio=decrease,pad={d}:{d}:(ow-iw)/2:(oh-ih)/2:color=black@0",
-            .{ self.fps, max_preview_width, max_preview_height, max_preview_width, max_preview_height },
+            "fps={d:.6},scale={d}:{d}",
+            .{ self.fps, self.width, self.height },
         );
         defer self.allocator.free(scale_filter);
 
@@ -322,6 +324,12 @@ pub const Player = struct {
             "-loglevel",
             "error",
             "-nostdin",
+            "-threads",
+            "2",
+            "-filter_threads",
+            "2",
+            "-filter_complex_threads",
+            "2",
             "-ss",
             seek_text,
             "-i",

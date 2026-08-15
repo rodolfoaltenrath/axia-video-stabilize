@@ -10,6 +10,7 @@ pub const trajectory = @import("trajectory.zig");
 pub const warp = @import("warp.zig");
 pub const crop = @import("crop.zig");
 pub const session = @import("session.zig");
+pub const diagnostics = @import("diagnostics.zig");
 pub const renderer = @import("renderer.zig");
 pub const encoder = @import("encoder.zig");
 pub const muxer = @import("muxer.zig");

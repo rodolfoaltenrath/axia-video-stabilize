@@ -11,16 +11,39 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
-    if (args.len < 2 or args.len > 3) {
-        std.debug.print("uso: axia-cli <entrada> [saida.mp4]\n", .{});
+    if (args.len < 2) {
+        printUsage();
         return error.InvalidArguments;
     }
 
     const input_path = args[1];
+    var output_path_optional: ?[]const u8 = null;
+    var diagnostics_path: ?[]const u8 = null;
+    var argument_index: usize = 2;
+    while (argument_index < args.len) {
+        const argument = args[argument_index];
+        if (std.mem.eql(u8, argument, "--diagnostics")) {
+            if (diagnostics_path != null or argument_index + 1 >= args.len) {
+                printUsage();
+                return error.InvalidArguments;
+            }
+            diagnostics_path = args[argument_index + 1];
+            if (diagnostics_path.?.len == 0) return error.InvalidArguments;
+            argument_index += 2;
+            continue;
+        }
+        if (std.mem.startsWith(u8, argument, "--") or
+            output_path_optional != null)
+        {
+            printUsage();
+            return error.InvalidArguments;
+        }
+        output_path_optional = argument;
+        argument_index += 1;
+    }
+
     var output_buffer: [app_state.max_path_bytes]u8 = undefined;
-    const output_path = if (args.len == 3)
-        args[2]
-    else
+    const output_path = output_path_optional orelse
         try media.deriveOutputPath(&output_buffer, input_path);
 
     std.debug.print("Axia: iniciando pipeline nativo para {s}\n", .{input_path});
@@ -30,6 +53,7 @@ pub fn main() !void {
         input_path,
         output_path,
         .{
+            .diagnostics_path = diagnostics_path,
             .observer = .{
                 .context = &progress,
                 .on_progress = CliProgress.onProgress,
@@ -39,6 +63,17 @@ pub fn main() !void {
     std.debug.print(
         "Axia: concluído em {s} ({d} frames, {d} faixas de áudio)\n",
         .{ output_path, result.frames, result.audio_streams },
+    );
+    if (diagnostics_path) |path| {
+        std.debug.print("Axia: diagnóstico salvo em {s}\n", .{path});
+    }
+}
+
+fn printUsage() void {
+    std.debug.print(
+        "uso: axia-cli <entrada> [saida.mp4] " ++
+            "[--diagnostics relatorio.csv]\n",
+        .{},
     );
 }
 

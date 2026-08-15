@@ -18,9 +18,9 @@ pub const UiResult = struct {
 pub fn draw(snapshot: state_mod.Snapshot, preview: preview_player.View) UiResult {
     const width: f32 = @floatFromInt(rl.getScreenWidth());
     const height: f32 = @floatFromInt(rl.getScreenHeight());
-    const top_h: f32 = 64;
-    const right_w: f32 = if (width > 900) 320 else 270;
-    const timeline_h: f32 = 174;
+    const top_h: f32 = 72;
+    const right_w: f32 = if (width >= 1200) 328 else 300;
+    const timeline_h: f32 = 166;
     const pad: f32 = 16;
 
     rl.clearBackground(theme.background);
@@ -41,7 +41,7 @@ pub fn draw(snapshot: state_mod.Snapshot, preview: preview_player.View) UiResult
         .height = height - top_h - pad * 2,
     };
     var result = drawParameters(panel, snapshot);
-    result.import_requested = top_actions.import_requested;
+    result.import_requested = top_actions.import_requested or player_actions.import_requested;
     result.start_requested = result.start_requested or top_actions.start_requested;
 
     const timeline = rl.Rectangle{
@@ -63,21 +63,58 @@ const TopBarActions = struct {
 
 fn drawTopBar(width: f32, height: f32, snapshot: state_mod.Snapshot) TopBarActions {
     rl.drawRectangleRec(.{ .x = 0, .y = 0, .width = width, .height = height }, theme.surface);
-    rl.drawLineEx(.{ .x = 0, .y = height }, .{ .x = width, .y = height }, 1, theme.border);
-    rl.drawCircleV(.{ .x = 30, .y = 32 }, 13, theme.accent);
-    components.textStrong("S", 25, 21, 20, theme.text);
-    components.textStrong("AXIA", 54, 19, 18, theme.text);
-    components.text("WORKSPACE", 55, 40, 10, theme.text_muted);
+    rl.drawRectangleRec(.{ .x = 0, .y = height - 1, .width = width, .height = 1 }, theme.border_soft);
+    rl.drawRectangleRec(.{ .x = 0, .y = height, .width = width, .height = 4 }, theme.shadow);
+
+    const mark = rl.Rectangle{ .x = 20, .y = 17, .width = 38, .height = 38 };
+    rl.drawRectangleRounded(mark, 0.28, 8, theme.accent);
+    components.textStrong("A", mark.x + 11, mark.y + 7, 21, theme.text);
+    components.textStrong("AXIA", 70, 17, 18, theme.text);
+    components.text("ESTABILIZAÇÃO DE VÍDEO", 70, 40, 10, theme.text_muted);
 
     const busy = snapshot.phase.isBusy();
+    const import_rect = rl.Rectangle{
+        .x = width - 164,
+        .y = 16,
+        .width = 144,
+        .height = 40,
+    };
+    drawPhasePill(import_rect.x - 14, height * 0.5, snapshot.phase);
     return .{
         .import_requested = components.button(
-            .{ .x = width - 152, .y = 14, .width = 132, .height = 38 },
-            "IMPORTAR VÍDEO",
+            import_rect,
+            "IMPORTAR",
             .secondary,
             !busy,
         ),
-        .start_requested = false, // O botão superior de estabilizar foi removido para focar a ação no painel lateral
+        .start_requested = false,
+    };
+}
+
+fn drawPhasePill(right: f32, center_y: f32, phase: state_mod.Phase) void {
+    const label = phase.label();
+    const label_size = fonts.measure(label, 11, .semibold);
+    const width = label_size.x + 38;
+    const rect = rl.Rectangle{
+        .x = right - width,
+        .y = center_y - 15,
+        .width = width,
+        .height = 30,
+    };
+    const color = phaseColor(phase);
+    rl.drawRectangleRounded(rect, 0.5, 8, theme.surface_alt);
+    rl.drawRectangleRoundedLinesEx(rect, 0.5, 8, 1, theme.border_soft);
+    rl.drawCircleV(.{ .x = rect.x + 14, .y = center_y }, 4, color);
+    components.textStrong(label, rect.x + 25, rect.y + 9, 11, theme.text_muted);
+}
+
+fn phaseColor(phase: state_mod.Phase) rl.Color {
+    return switch (phase) {
+        .completed => theme.success,
+        .failed => theme.danger,
+        .cancelled => theme.text_subtle,
+        .loading, .analyzing, .smoothing, .rendering, .muxing => theme.accent,
+        .idle => theme.success,
     };
 }
 
@@ -86,22 +123,32 @@ fn drawPreview(
     snapshot: state_mod.Snapshot,
     preview: preview_player.View,
 ) PlayerActions {
-    rl.drawRectangleRounded(area, 0.025, 10, theme.surface);
-    rl.drawRectangleRoundedLinesEx(area, 0.025, 10, 1, theme.border);
-    components.text("PREVIEW", area.x + 18, area.y + 15, 12, theme.text_muted);
-    components.text("ORIGINAL", area.x + area.width - 78, area.y + 15, 12, theme.text_muted);
+    components.card(area);
+    components.textStrong("Visualização", area.x + 18, area.y + 15, 14, theme.text);
+
+    const source_label = "ORIGINAL";
+    const source_size = fonts.measure(source_label, 10, .semibold);
+    const source_pill = rl.Rectangle{
+        .x = area.x + area.width - source_size.x - 34,
+        .y = area.y + 12,
+        .width = source_size.x + 18,
+        .height = 24,
+    };
+    rl.drawRectangleRounded(source_pill, 0.5, 8, theme.accent_subtle);
+    components.textStrong(source_label, source_pill.x + 9, source_pill.y + 7, 10, theme.accent_hover);
 
     const aspect = if (preview.width > 0 and preview.height > 0)
         @as(f32, @floatFromInt(preview.width)) / @as(f32, @floatFromInt(preview.height))
     else
         16.0 / 9.0;
     const viewport = fitAspect(.{
-        .x = area.x + 20,
-        .y = area.y + 44,
-        .width = area.width - 40,
-        .height = area.height - 112,
+        .x = area.x + 18,
+        .y = area.y + 48,
+        .width = area.width - 36,
+        .height = area.height - 116,
     }, aspect);
-    rl.drawRectangleRec(viewport, theme.preview);
+    rl.drawRectangleRounded(viewport, 0.018, 8, theme.preview);
+    rl.drawRectangleRoundedLinesEx(viewport, 0.018, 8, 1, theme.border_soft);
 
     if (preview.texture) |texture| {
         rl.drawTexturePro(
@@ -119,68 +166,131 @@ fn drawPreview(
         );
     }
 
-    if (snapshot.media.hasInput()) {
+    var empty_import_requested = false;
+    if (!snapshot.media.hasInput()) {
+        empty_import_requested = drawEmptyPreview(viewport);
+    } else {
         const name = snapshot.media.name();
         const text_size = fonts.measure(name, 12, .regular);
         const pill = rl.Rectangle{
             .x = viewport.x + 10,
             .y = viewport.y + viewport.height - 34,
-            .width = text_size.x + 16,
+            .width = @min(text_size.x + 16, viewport.width - 20),
             .height = 24,
         };
         rl.drawRectangleRounded(pill, 0.5, 8, rl.Color.init(0, 0, 0, 160));
-        components.text(name, pill.x + 8, pill.y + 6, 12, rl.Color.init(231, 235, 242, 255));
-    } else {
-        const msg = "IMPORTE UM VÍDEO PARA COMEÇAR";
-        const text_size = fonts.measure(msg, 12, .regular);
-        const pill = rl.Rectangle{
-            .x = viewport.x + 10,
-            .y = viewport.y + viewport.height - 34,
-            .width = text_size.x + 16,
-            .height = 24,
-        };
-        rl.drawRectangleRounded(pill, 0.5, 8, rl.Color.init(0, 0, 0, 160));
-        components.text(msg, pill.x + 8, pill.y + 6, 12, rl.Color.init(231, 235, 242, 255));
+        drawClippedText(name, pill.x + 8, pill.y + 6, pill.width - 16, 12, theme.text);
     }
 
     if (preview.failed) {
         components.text("PREVIEW INDISPONÍVEL", viewport.x + 18, viewport.y + 18, 12, theme.danger);
     }
+    rl.drawRectangleRoundedLinesEx(viewport, 0.018, 8, 1, theme.border_soft);
 
     const controls_width = @min(area.width - 40, @max(viewport.width, 460));
-    return drawPreviewControls(.{
+    var actions = drawPreviewControls(.{
         .x = area.x + (area.width - controls_width) * 0.5,
         .y = area.y + area.height - 58,
         .width = controls_width,
         .height = 42,
     }, snapshot, preview);
+    actions.import_requested = empty_import_requested;
+    return actions;
+}
+
+fn drawEmptyPreview(viewport: rl.Rectangle) bool {
+    const center_x = viewport.x + viewport.width * 0.5;
+    const center_y = viewport.y + viewport.height * 0.5 - 12;
+    const action = rl.Rectangle{
+        .x = center_x - 170,
+        .y = center_y - 60,
+        .width = 340,
+        .height = 126,
+    };
+    const hovered = rl.checkCollisionPointRec(rl.getMousePosition(), action);
+    if (hovered) {
+        rl.drawRectangleRounded(action, 0.08, 8, theme.surface_raised);
+        rl.drawRectangleRoundedLinesEx(action, 0.08, 8, 1, theme.border_soft);
+    }
+    const icon = rl.Rectangle{
+        .x = center_x - 24,
+        .y = center_y - 34,
+        .width = 48,
+        .height = 34,
+    };
+    rl.drawRectangleRounded(icon, 0.16, 6, if (hovered) theme.surface_hover else theme.surface_alt);
+    rl.drawRectangleRoundedLinesEx(icon, 0.16, 6, 1, theme.border);
+    rl.drawTriangle(
+        .{ .x = center_x - 5, .y = icon.y + 9 },
+        .{ .x = center_x - 5, .y = icon.y + 25 },
+        .{ .x = center_x + 8, .y = icon.y + 17 },
+        theme.accent,
+    );
+
+    const title = if (hovered)
+        "Clique para importar um vídeo"
+    else
+        "Importe um vídeo para visualizar";
+    const title_size = fonts.measure(title, 14, .semibold);
+    components.textStrong(title, center_x - title_size.x * 0.5, center_y + 14, 14, theme.text);
+    const detail = "MP4, MOV, MKV, AVI, WebM ou MTS";
+    const detail_size = fonts.measure(detail, 11, .regular);
+    components.text(detail, center_x - detail_size.x * 0.5, center_y + 38, 11, theme.text_muted);
+    return hovered and rl.isMouseButtonPressed(.left);
+}
+
+fn drawClippedText(
+    label: [:0]const u8,
+    x: f32,
+    y: f32,
+    width: f32,
+    size: i32,
+    color: rl.Color,
+) void {
+    rl.beginScissorMode(
+        @intFromFloat(@floor(x)),
+        @intFromFloat(@floor(y)),
+        @intFromFloat(@ceil(width)),
+        size + 5,
+    );
+    components.text(label, x, y, size, color);
+    rl.endScissorMode();
 }
 
 fn drawParameters(panel: rl.Rectangle, snapshot: state_mod.Snapshot) UiResult {
     var result = UiResult{ .parameters = snapshot.parameters };
-    rl.drawRectangleRounded(panel, 0.025, 10, theme.surface);
-    rl.drawRectangleRoundedLinesEx(panel, 0.025, 10, 1, theme.border);
+    components.card(panel);
     const x = panel.x + 20;
     const content_w = panel.width - 40;
 
-    components.textStrong("PARÂMETROS", x, panel.y + 18, 12, theme.text_muted);
-    components.textStrong("Estabilização", x, panel.y + 47, 20, theme.text);
-    rl.drawLineEx(.{ .x = x, .y = panel.y + 82 }, .{ .x = panel.x + panel.width - 20, .y = panel.y + 82 }, 1, theme.border);
+    components.textStrong("Ajustes", x, panel.y + 17, 20, theme.text);
+    components.text("Configure o resultado do vídeo", x, panel.y + 46, 12, theme.text_muted);
+    rl.drawLineEx(.{ .x = x, .y = panel.y + 78 }, .{ .x = panel.x + panel.width - 20, .y = panel.y + 78 }, 1, theme.border_soft);
 
-    components.text("MODO", x, panel.y + 104, 12, theme.text_muted);
-    const left = rl.Rectangle{ .x = x, .y = panel.y + 126, .width = content_w * 0.5 - 4, .height = 38 };
+    components.textStrong("ESTABILIZAÇÃO", x, panel.y + 94, 10, theme.text_subtle);
+    const left = rl.Rectangle{ .x = x, .y = panel.y + 114, .width = content_w * 0.5 - 4, .height = 38 };
     const right = rl.Rectangle{ .x = x + content_w * 0.5 + 4, .y = left.y, .width = content_w * 0.5 - 4, .height = 38 };
     if (components.button(left, "MOVIMENTO", if (result.parameters.mode == .motion) .primary else .secondary, true)) result.parameters.mode = .motion;
     if (components.button(right, "DISTORÇÃO", if (result.parameters.mode == .distortion) .primary else .secondary, false)) result.parameters.mode = .distortion;
 
-    _ = components.slider(.{ .x = x, .y = panel.y + 176, .width = content_w, .height = 50 }, "Suavidade", &result.parameters.smoothness, 0, 100, "%");
-    _ = components.slider(.{ .x = x, .y = panel.y + 236, .width = content_w, .height = 50 }, "Margem de crop", &result.parameters.crop, 0, 30, "%");
-    _ = components.toggle(x, panel.y + 304, "Crop dinâmico", &result.parameters.dynamic_crop);
+    _ = components.slider(.{ .x = x, .y = panel.y + 166, .width = content_w, .height = 50 }, "Suavidade", &result.parameters.smoothness, 0, 100, "%");
+    _ = components.slider(.{ .x = x, .y = panel.y + 226, .width = content_w, .height = 50 }, "Recorte adicional", &result.parameters.crop, 0, 30, "%");
+    components.text("PRESERVA A IMAGEM", x, panel.y + 270, 9, theme.text_subtle);
+    const crop_hint_right = "OCULTA BORDAS";
+    const crop_hint_size = fonts.measure(crop_hint_right, 9, .regular);
+    components.text(
+        crop_hint_right,
+        x + content_w - crop_hint_size.x,
+        panel.y + 270,
+        9,
+        theme.text_subtle,
+    );
+    _ = components.toggle(x, panel.y + 294, "Recorte automático", &result.parameters.dynamic_crop);
 
-    components.text("QUALIDADE", x, panel.y + 342, 12, theme.text_muted);
+    components.textStrong("QUALIDADE DA SAÍDA", x, panel.y + 330, 10, theme.text_subtle);
     const quality_gap: f32 = 5;
     const quality_width = (content_w - quality_gap * 2) / 3;
-    const quality_y = panel.y + 362;
+    const quality_y = panel.y + 350;
     if (components.button(
         .{ .x = x, .y = quality_y, .width = quality_width, .height = 34 },
         "ALTA",
@@ -200,25 +310,18 @@ fn drawParameters(panel: rl.Rectangle, snapshot: state_mod.Snapshot) UiResult {
         true,
     )) result.parameters.export_quality = .compact;
 
-    const note = rl.Rectangle{ .x = x, .y = panel.y + 410, .width = content_w, .height = 56 };
-    rl.drawRectangleRounded(note, 0.12, 8, theme.surface_alt);
-    components.textStrong("PIPELINE REAL EM 2 PASSOS", note.x + 12, note.y + 9, 11, theme.accent);
-    if (snapshot.media.hasInput()) {
-        components.text("Movimento estimado pela engine Zig.", note.x + 12, note.y + 28, 12, theme.text_muted);
-        components.text("Saída MP4 ao lado do original.", note.x + 12, note.y + 43, 12, theme.text_muted);
-    } else {
-        components.text("Clique em Importar vídeo.", note.x + 12, note.y + 28, 12, theme.text_muted);
-        components.text("MP4, MOV, MKV, AVI, WebM, MTS.", note.x + 12, note.y + 43, 12, theme.text_muted);
-    }
-
     const busy = snapshot.phase.isBusy();
     const button_y = panel.y + panel.height - 58;
+    drawOutputNote(
+        .{ .x = x, .y = button_y - 76, .width = content_w, .height = 60 },
+        snapshot,
+    );
     if (busy) {
-        result.cancel_requested = components.button(.{ .x = x, .y = button_y, .width = content_w, .height = 40 }, "CANCELAR PROCESSAMENTO", .danger, true);
+        result.cancel_requested = components.button(.{ .x = x, .y = button_y, .width = content_w, .height = 42 }, "CANCELAR", .danger, true);
     } else {
         result.start_requested = components.button(
-            .{ .x = x, .y = button_y, .width = content_w, .height = 40 },
-            "ANALISAR E EXPORTAR",
+            .{ .x = x, .y = button_y, .width = content_w, .height = 42 },
+            "ESTABILIZAR VÍDEO",
             .primary,
             snapshot.media.hasInput(),
         );
@@ -226,7 +329,38 @@ fn drawParameters(panel: rl.Rectangle, snapshot: state_mod.Snapshot) UiResult {
     return result;
 }
 
+fn drawOutputNote(rect: rl.Rectangle, snapshot: state_mod.Snapshot) void {
+    const color = switch (snapshot.phase) {
+        .completed => theme.success,
+        .failed => theme.danger,
+        else => theme.accent,
+    };
+    rl.drawRectangleRounded(rect, 0.12, 8, theme.surface_raised);
+    rl.drawRectangleRoundedLinesEx(rect, 0.12, 8, 1, theme.border_soft);
+    rl.drawRectangleRounded(
+        .{ .x = rect.x, .y = rect.y + 9, .width = 3, .height = rect.height - 18 },
+        1,
+        4,
+        color,
+    );
+
+    if (snapshot.phase == .completed) {
+        components.textStrong("VÍDEO CONCLUÍDO", rect.x + 14, rect.y + 10, 10, theme.success);
+        components.text("A saída foi salva ao lado do original.", rect.x + 14, rect.y + 31, 11, theme.text_muted);
+    } else if (snapshot.phase == .failed) {
+        components.textStrong("NÃO FOI POSSÍVEL CONCLUIR", rect.x + 14, rect.y + 10, 10, theme.danger);
+        drawClippedText(snapshot.status(), rect.x + 14, rect.y + 31, rect.width - 28, 11, theme.text_muted);
+    } else if (snapshot.media.hasInput()) {
+        components.textStrong("ORIGINAL PRESERVADO", rect.x + 14, rect.y + 10, 10, theme.accent_hover);
+        components.text("A saída será criada na mesma pasta.", rect.x + 14, rect.y + 31, 11, theme.text_muted);
+    } else {
+        components.textStrong("COMECE IMPORTANDO UM VÍDEO", rect.x + 14, rect.y + 10, 10, theme.accent_hover);
+        components.text("O arquivo original não será alterado.", rect.x + 14, rect.y + 31, 11, theme.text_muted);
+    }
+}
+
 const PlayerActions = struct {
+    import_requested: bool = false,
     toggle_requested: bool = false,
     seek_ratio: ?f32 = null,
 };
@@ -367,22 +501,29 @@ fn drawTimeline(
     snapshot: state_mod.Snapshot,
     preview: preview_player.View,
 ) void {
-    rl.drawRectangleRounded(area, 0.025, 10, theme.surface);
-    rl.drawRectangleRoundedLinesEx(area, 0.025, 10, 1, theme.border);
-    components.text("TIMELINE", area.x + 18, area.y + 14, 12, theme.text_muted);
+    components.card(area);
+    components.textStrong("Linha do tempo", area.x + 18, area.y + 14, 14, theme.text);
 
     var time_buffer: [40]u8 = undefined;
     const time_text = formatPlayerTime(&time_buffer, preview.position_seconds, preview.duration_seconds);
-    const time_measure = @as(f32, @floatFromInt(time_text.len)) * 7.2;
-    components.text(time_text, area.x + area.width - time_measure - 18, area.y + 14, 12, theme.text);
+    const time_measure = fonts.measure(time_text, 11, .semibold);
+    const time_pill = rl.Rectangle{
+        .x = area.x + area.width - time_measure.x - 34,
+        .y = area.y + 10,
+        .width = time_measure.x + 18,
+        .height = 25,
+    };
+    rl.drawRectangleRounded(time_pill, 0.5, 8, theme.surface_alt);
+    components.textStrong(time_text, time_pill.x + 9, time_pill.y + 7, 11, theme.text_muted);
 
     const track = rl.Rectangle{
         .x = area.x + 18,
-        .y = area.y + 51,
+        .y = area.y + 48,
         .width = area.width - 36,
-        .height = 70,
+        .height = 66,
     };
-    rl.drawRectangleRounded(track, 0.06, 8, theme.surface_alt);
+    rl.drawRectangleRounded(track, 0.06, 8, theme.surface_raised);
+    rl.drawRectangleRoundedLinesEx(track, 0.06, 8, 1, theme.border_soft);
 
     var tick: usize = 0;
     while (tick <= 10) : (tick += 1) {
@@ -392,7 +533,7 @@ fn drawTimeline(
             .{ .x = x, .y = track.y - 10 },
             .{ .x = x, .y = track.y - tick_height },
             1,
-            rl.Color.init(80, 90, 110, 255), // Nova cor sutil para os divisores
+            theme.border,
         );
     }
 
@@ -403,9 +544,8 @@ fn drawTimeline(
             .width = track.width - 8,
             .height = track.height - 16,
         };
-        rl.drawRectangleRounded(clip, 0.08, 6, theme.accent_soft);
+        rl.drawRectangleRounded(clip, 0.08, 6, theme.accent_subtle);
 
-        // Efeito de inner glow (vidro) no clipe
         const inner_clip = rl.Rectangle{
             .x = clip.x + 1,
             .y = clip.y + 1,
@@ -417,7 +557,6 @@ fn drawTimeline(
 
         components.textStrong(snapshot.media.name(), clip.x + 12, clip.y + 18, 12, theme.text);
 
-        // Renderiza o tempo total dentro do próprio bloco do clipe se ele não for muito esmagado
         if (clip.width > 150) {
             const dur_total: u64 = @intFromFloat(@max(0.0, @floor(preview.duration_seconds)));
             var dur_buf: [16]u8 = undefined;
@@ -445,13 +584,21 @@ fn drawTimeline(
             theme.accent,
         );
     } else {
-        components.text("NENHUMA MÍDIA NA TIMELINE", track.x + 14, track.y + 26, 12, theme.text_muted);
+        const empty_text = "A mídia importada aparecerá aqui";
+        const empty_size = fonts.measure(empty_text, 12, .regular);
+        components.text(
+            empty_text,
+            track.x + (track.width - empty_size.x) * 0.5,
+            track.y + 25,
+            12,
+            theme.text_muted,
+        );
     }
 
     if (snapshot.phase.isBusy()) {
         components.progressBar(.{
             .x = area.x + 18,
-            .y = area.y + 138,
+            .y = area.y + 132,
             .width = area.width - 90,
             .height = 8,
         }, snapshot.progress);
@@ -461,8 +608,8 @@ fn drawTimeline(
             "{d:.0}%",
             .{snapshot.progress * 100.0},
         ) catch "--";
-        components.text(percent, area.x + area.width - 58, area.y + 133, 14, theme.text);
-        components.text(snapshot.status(), area.x + 18, area.y + 153, 12, theme.text_muted);
+        components.text(percent, area.x + area.width - 58, area.y + 127, 14, theme.text);
+        components.text(snapshot.status(), area.x + 18, area.y + 147, 12, theme.text_muted);
         var metrics_buffer: [96]u8 = undefined;
         const metrics = formatProcessingMetrics(&metrics_buffer, snapshot);
         if (metrics.len > 0) {
@@ -470,7 +617,7 @@ fn drawTimeline(
             components.text(
                 metrics,
                 area.x + area.width - metrics_size.x - 18,
-                area.y + 153,
+                area.y + 147,
                 12,
                 theme.text,
             );
@@ -479,7 +626,7 @@ fn drawTimeline(
         components.text(
             if (snapshot.media.hasInput()) "1 faixa de vídeo" else "Importe uma mídia para começar.",
             area.x + 18,
-            area.y + 143,
+            area.y + 137,
             12,
             theme.text_muted,
         );

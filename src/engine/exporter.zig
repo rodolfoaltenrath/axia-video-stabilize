@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics.zig");
 const encoder_mod = @import("encoder.zig");
 const muxer = @import("muxer.zig");
 const renderer = @import("renderer.zig");
@@ -42,6 +43,7 @@ pub const Options = struct {
     session: session_mod.Options = .{},
     encoder: encoder_mod.Options = .{},
     muxer: muxer.Options = .{},
+    diagnostics_path: ?[]const u8 = null,
     observer: Observer = .{},
 };
 
@@ -56,8 +58,10 @@ pub const ExportError = error{
     InputEqualsOutput,
     EmptyAnalysis,
     PublishFailed,
+    DiagnosticsPathConflict,
 } || session_mod.SessionError || renderer.RenderError ||
     encoder_mod.EncoderError || muxer.MuxError ||
+    diagnostics.DiagnosticsError ||
     std.mem.Allocator.Error;
 
 pub const Exporter = if (native_enabled) NativeExporter else DisabledExporter;
@@ -86,6 +90,13 @@ const NativeExporter = struct {
     ) ExportError!Result {
         if (std.mem.eql(u8, input_path, output_path)) {
             return error.InputEqualsOutput;
+        }
+        if (options.diagnostics_path) |diagnostics_path| {
+            if (std.mem.eql(u8, diagnostics_path, input_path) or
+                std.mem.eql(u8, diagnostics_path, output_path))
+            {
+                return error.DiagnosticsPathConflict;
+            }
         }
         if (options.observer.isCancelled()) return error.Cancelled;
 
@@ -121,6 +132,13 @@ const NativeExporter = struct {
         );
         defer analysis.deinit();
         if (analysis.records.len == 0) return error.EmptyAnalysis;
+        if (options.diagnostics_path) |diagnostics_path| {
+            try diagnostics.writeCsv(
+                allocator,
+                diagnostics_path,
+                &analysis,
+            );
+        }
 
         var encoder = try encoder_mod.Encoder.create(
             allocator,

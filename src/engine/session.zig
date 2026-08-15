@@ -232,17 +232,37 @@ fn scaleCorrections(
         @as(f64, @floatFromInt(analysis_dimensions.width));
     const scale_y = @as(f64, @floatFromInt(source_dimensions.height)) /
         @as(f64, @floatFromInt(analysis_dimensions.height));
+    const analysis_center_x =
+        (@as(f64, @floatFromInt(analysis_dimensions.width)) - 1.0) / 2.0;
+    const analysis_center_y =
+        (@as(f64, @floatFromInt(analysis_dimensions.height)) - 1.0) / 2.0;
+    const source_center_x =
+        (@as(f64, @floatFromInt(source_dimensions.width)) - 1.0) / 2.0;
+    const source_center_y =
+        (@as(f64, @floatFromInt(source_dimensions.height)) - 1.0) / 2.0;
     for (corrections, output) |correction, *scaled| {
         scaled.* = correction;
-        scaled.x *= scale_x;
-        scaled.y *= scale_y;
+        const cosine = @cos(correction.angle) * correction.scale;
+        const sine = @sin(correction.angle) * correction.scale;
+        const corrected_center_x = cosine * analysis_center_x -
+            sine * analysis_center_y + correction.x;
+        const corrected_center_y = sine * analysis_center_x +
+            cosine * analysis_center_y + correction.y;
+        const center_displacement_x =
+            (corrected_center_x - analysis_center_x) * scale_x;
+        const center_displacement_y =
+            (corrected_center_y - analysis_center_y) * scale_y;
+        scaled.x = source_center_x + center_displacement_x -
+            (cosine * source_center_x - sine * source_center_y);
+        scaled.y = source_center_y + center_displacement_y -
+            (sine * source_center_x + cosine * source_center_y);
     }
     return output;
 }
 
 test "render corrections scale from analysis to source dimensions" {
     const input = [_]trajectory.Correction{
-        .{ .x = 4, .y = -3, .angle = 0.1, .scale = 1.02 },
+        .{ .x = 4, .y = -3 },
     };
     const output = try scaleCorrections(
         std.testing.allocator,
@@ -255,4 +275,54 @@ test "render corrections scale from analysis to source dimensions" {
     try std.testing.expectEqual(@as(f64, -6), output[0].y);
     try std.testing.expectEqual(input[0].angle, output[0].angle);
     try std.testing.expectEqual(input[0].scale, output[0].scale);
+}
+
+test "render correction preserves a centered rotation across resolutions" {
+    const analysis = decoder.Dimensions{ .width = 853, .height = 480 };
+    const source = decoder.Dimensions{ .width = 1920, .height = 1080 };
+    const analysis_center_x =
+        (@as(f64, @floatFromInt(analysis.width)) - 1.0) / 2.0;
+    const analysis_center_y =
+        (@as(f64, @floatFromInt(analysis.height)) - 1.0) / 2.0;
+    const angle = 0.18;
+    const scale = 1.03;
+    const cosine = @cos(angle) * scale;
+    const sine = @sin(angle) * scale;
+    const input = [_]trajectory.Correction{.{
+        .x = analysis_center_x - cosine * analysis_center_x +
+            sine * analysis_center_y,
+        .y = analysis_center_y - sine * analysis_center_x -
+            cosine * analysis_center_y,
+        .angle = angle,
+        .scale = scale,
+    }};
+
+    const output = try scaleCorrections(
+        std.testing.allocator,
+        &input,
+        analysis,
+        source,
+    );
+    defer std.testing.allocator.free(output);
+    const matrix = try warp.matrixFromCorrection(
+        output[0],
+        1,
+        source.width,
+        source.height,
+    );
+    const source_center = warp.Point{
+        .x = (@as(f64, @floatFromInt(source.width)) - 1.0) / 2.0,
+        .y = (@as(f64, @floatFromInt(source.height)) - 1.0) / 2.0,
+    };
+    const corrected_center = matrix.apply(source_center);
+    try std.testing.expectApproxEqAbs(
+        source_center.x,
+        corrected_center.x,
+        0.000001,
+    );
+    try std.testing.expectApproxEqAbs(
+        source_center.y,
+        corrected_center.y,
+        0.000001,
+    );
 }

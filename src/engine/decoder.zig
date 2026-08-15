@@ -6,6 +6,7 @@ const ffmpeg = if (build_options.native_ffmpeg) @cImport({
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavformat/avformat.h");
     @cInclude("libavutil/avutil.h");
+    @cInclude("libavutil/display.h");
     @cInclude("libavutil/pixdesc.h");
     @cInclude("libswscale/swscale.h");
 }) else struct {};
@@ -37,12 +38,15 @@ pub const Options = struct {
 
 pub const PixelFormat = enum {
     gray8,
+    /// BGRA scaled to `VideoInfo.analysis` for color-aware analysis.
+    bgra8_analysis,
+    /// Full-resolution BGRA used by the renderer and encoder.
     bgra8,
 
     pub fn bytesPerPixel(self: PixelFormat) usize {
         return switch (self) {
             .gray8 => 1,
-            .bgra8 => 4,
+            .bgra8_analysis, .bgra8 => 4,
         };
     }
 };
@@ -74,6 +78,7 @@ pub const ColorInfo = struct {
 pub const VideoInfo = struct {
     source: Dimensions,
     analysis: Dimensions,
+    display_rotation_degrees: f64 = 0,
     color: ColorInfo,
     time_base: types.Rational,
     frame_rate: ?types.Rational,
@@ -85,7 +90,21 @@ pub const VideoInfo = struct {
         return @as(f64, @floatFromInt(rate.numerator)) /
             @as(f64, @floatFromInt(rate.denominator));
     }
+
+    pub fn displayDimensions(self: VideoInfo) Dimensions {
+        return orientedDimensions(self.source, self.display_rotation_degrees);
+    }
 };
+
+pub fn orientedDimensions(
+    source: Dimensions,
+    rotation_degrees: f64,
+) Dimensions {
+    if (!std.math.isFinite(rotation_degrees)) return source;
+    const quarter_turns: i32 = @intFromFloat(@round(rotation_degrees / 90));
+    if (@abs(quarter_turns) % 2 == 0) return source;
+    return .{ .width = source.height, .height = source.width };
+}
 
 /// Borrowed frame view. Pixel memory remains owned by `Decoder` and is valid
 /// only until the next `readFrame` call or `deinit`.
@@ -250,13 +269,14 @@ const NativeDecoder = struct {
             .width = @intCast(codec_context.width),
             .height = @intCast(codec_context.height),
         };
+        const display_rotation_degrees = streamDisplayRotation(stream);
         const analysis = try fitAnalysisDimensions(
             source.width,
             source.height,
             options.max_analysis_dimension,
         );
         const output_dimensions = switch (options.output_format) {
-            .gray8 => analysis,
+            .gray8, .bgra8_analysis => analysis,
             .bgra8 => source,
         };
         const output_stride = std.math.mul(
@@ -335,6 +355,7 @@ const NativeDecoder = struct {
             .info = .{
                 .source = source,
                 .analysis = analysis,
+                .display_rotation_degrees = display_rotation_degrees,
                 .color = .{
                     .range = @intCast(codec_context.color_range),
                     .primaries = @intCast(codec_context.color_primaries),
@@ -437,7 +458,7 @@ const NativeDecoder = struct {
         const output_pixel_format: ffmpeg.AVPixelFormat =
             switch (self.output_format) {
             .gray8 => ffmpeg.AV_PIX_FMT_GRAY8,
-            .bgra8 => ffmpeg.AV_PIX_FMT_BGRA,
+            .bgra8_analysis, .bgra8 => ffmpeg.AV_PIX_FMT_BGRA,
         };
         const cached_context = ffmpeg.sws_getCachedContext(
             self.sws_context,
@@ -531,6 +552,44 @@ const NativeDecoder = struct {
     }
 };
 
+fn streamDisplayRotation(stream: *ffmpeg.AVStream) f64 {
+    if (@hasField(ffmpeg.AVCodecParameters, "nb_coded_side_data") and
+        @hasDecl(ffmpeg, "av_packet_side_data_get"))
+    {
+        const parameters = stream.*.codecpar;
+        const side_data = ffmpeg.av_packet_side_data_get(
+            parameters.*.coded_side_data,
+            parameters.*.nb_coded_side_data,
+            ffmpeg.AV_PKT_DATA_DISPLAYMATRIX,
+        );
+        if (side_data) |value| {
+            return displayRotationFromSideData(
+                value.*.data,
+                @intCast(value.*.size),
+            );
+        }
+    } else if (@hasField(ffmpeg.AVStream, "nb_side_data")) {
+        const count: usize = @intCast(stream.*.nb_side_data);
+        for (0..count) |index| {
+            const value = stream.*.side_data[index];
+            if (value.type == ffmpeg.AV_PKT_DATA_DISPLAYMATRIX) {
+                return displayRotationFromSideData(
+                    value.data,
+                    @intCast(value.size),
+                );
+            }
+        }
+    }
+    return 0;
+}
+
+fn displayRotationFromSideData(data: [*c]const u8, size: usize) f64 {
+    if (data == null or size < 9 * @sizeOf(i32)) return 0;
+    const matrix: [*c]const i32 = @ptrCast(@alignCast(data));
+    const rotation = ffmpeg.av_display_rotation_get(matrix);
+    return if (std.math.isFinite(rotation)) rotation else 0;
+}
+
 fn configureColorConversion(
     context: *ffmpeg.SwsContext,
     source_format: ffmpeg.AVPixelFormat,
@@ -604,6 +663,26 @@ pub fn swsMatrix(matrix: i32, dimensions: Dimensions) c_int {
         else
             ffmpeg.SWS_CS_DEFAULT,
     };
+}
+
+test "display dimensions follow quarter-turn metadata" {
+    const landscape = Dimensions{ .width = 1920, .height = 1080 };
+    try std.testing.expectEqual(
+        Dimensions{ .width = 1080, .height = 1920 },
+        orientedDimensions(landscape, 90),
+    );
+    try std.testing.expectEqual(
+        Dimensions{ .width = 1080, .height = 1920 },
+        orientedDimensions(landscape, -90),
+    );
+    try std.testing.expectEqual(
+        landscape,
+        orientedDimensions(landscape, 180),
+    );
+    try std.testing.expectEqual(
+        landscape,
+        orientedDimensions(landscape, std.math.nan(f64)),
+    );
 }
 
 test "HDR transfer functions require explicit tone mapping" {

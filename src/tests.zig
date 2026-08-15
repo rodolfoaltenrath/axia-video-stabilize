@@ -50,6 +50,21 @@ test "preview size is bounded without upscaling" {
     try std.testing.expectEqual(@as(u32, 360), small.height);
 }
 
+test "preview frame rate is capped independently from export" {
+    try std.testing.expectEqual(
+        @as(f64, 30),
+        media.fitPreviewFrameRate(60),
+    );
+    try std.testing.expectEqual(
+        @as(f64, 24),
+        media.fitPreviewFrameRate(24),
+    );
+    try std.testing.expectEqual(
+        @as(f64, 30),
+        media.fitPreviewFrameRate(std.math.nan(f64)),
+    );
+}
+
 test "processing job freezes media and parameters" {
     var state = app_state.AppState{};
     try std.testing.expect(state.setMedia(
@@ -996,6 +1011,10 @@ test "decoder pixel formats report their storage width" {
     );
     try std.testing.expectEqual(
         @as(usize, 4),
+        decoder.PixelFormat.bgra8_analysis.bytesPerPixel(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
         decoder.PixelFormat.bgra8.bytesPerPixel(),
     );
 }
@@ -1171,6 +1190,338 @@ test "native motion estimator recovers a synthetic translation" {
     try std.testing.expect(estimate.spatial_coverage > 0.5);
 }
 
+test "native motion estimator expands optical flow for fast motion" {
+    if (!motion.native_enabled) return error.SkipZigTest;
+
+    const width = 160;
+    const height = 120;
+    var previous: [width * height]u8 = undefined;
+    var current = [_]u8{0} ** (width * height);
+    const shift_x = 12;
+    const shift_y = 4;
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const block_x = x / 4;
+            const block_y = y / 4;
+            const hash = (block_x * 37 + block_y * 61 +
+                block_x * block_y * 17) % 251;
+            previous[y * width + x] = @intCast(hash);
+        }
+    }
+    for (0..height - shift_y) |y| {
+        for (0..width - shift_x) |x| {
+            current[(y + shift_y) * width + x + shift_x] =
+                previous[y * width + x];
+        }
+    }
+
+    const base_options = motion.Options{
+        .features = .{
+            .grid_columns = 4,
+            .grid_rows = 3,
+            .max_per_cell = 16,
+            .quality_level = 0.02,
+            .min_distance = 4,
+            .border = 8,
+        },
+        .feature_retry_quality_factor = 1,
+        .feature_retry_min_distance_factor = 1,
+        .optical_flow = .{
+            .window_size = 9,
+            .max_pyramid_level = 1,
+        },
+        .optical_flow_retry_window_increment = 0,
+        .optical_flow_retry_pyramid_levels = 0,
+        .minimum_tracks = 12,
+    };
+    const previous_frame = motion.GrayFrame{
+        .pixels = &previous,
+        .width = width,
+        .height = height,
+        .stride = width,
+    };
+    const current_frame = motion.GrayFrame{
+        .pixels = &current,
+        .width = width,
+        .height = height,
+        .stride = width,
+    };
+
+    var strict_estimator = try motion.Estimator.init(
+        std.testing.allocator,
+        base_options,
+    );
+    defer strict_estimator.deinit();
+    const strict_estimate = try strict_estimator.estimate(
+        previous_frame,
+        current_frame,
+    );
+    try std.testing.expect(strict_estimate.confidence < 0.25);
+    try std.testing.expect(
+        @abs(strict_estimate.transform.x - shift_x) > 2,
+    );
+
+    var retry_options = base_options;
+    const adaptive_defaults = motion.Options{};
+    retry_options.optical_flow_retry_window_increment =
+        adaptive_defaults.optical_flow_retry_window_increment;
+    retry_options.optical_flow_retry_pyramid_levels =
+        adaptive_defaults.optical_flow_retry_pyramid_levels;
+    var retry_estimator = try motion.Estimator.init(
+        std.testing.allocator,
+        retry_options,
+    );
+    defer retry_estimator.deinit();
+    const estimate = try retry_estimator.estimate(
+        previous_frame,
+        current_frame,
+    );
+
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_x),
+        estimate.transform.x,
+        0.6,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_y),
+        estimate.transform.y,
+        0.6,
+    );
+    try std.testing.expect(estimate.tracked_points >= 12);
+    try std.testing.expect(estimate.confidence >= 0.25);
+}
+
+test "native motion estimator retries weak features before giving up" {
+    if (!motion.native_enabled) return error.SkipZigTest;
+
+    const width = 160;
+    const height = 120;
+    var previous = [_]u8{24} ** (width * height);
+    var current = [_]u8{24} ** (width * height);
+    const shift_x = 2;
+    const shift_y = 1;
+
+    // The bright square defines a high response that makes the normal relative
+    // quality threshold reject the dimmer corners spread across the frame.
+    for (45..55) |y| {
+        @memset(previous[y * width + 70 .. y * width + 80], 255);
+        @memset(
+            current[(y + shift_y) * width + 70 + shift_x .. (y + shift_y) * width + 80 + shift_x],
+            255,
+        );
+    }
+    for (0..4) |row| {
+        for (0..5) |column| {
+            const left = 10 + column * 34;
+            const top = 9 + row * 31;
+            for (0..6) |square_y| {
+                @memset(
+                    previous[(top + square_y) * width + left .. (top + square_y) * width + left + 6],
+                    58,
+                );
+                @memset(
+                    current[(top + shift_y + square_y) * width +
+                        left + shift_x .. (top + shift_y + square_y) * width +
+                        left + shift_x + 6],
+                    58,
+                );
+            }
+        }
+    }
+
+    const base_options = motion.Options{
+        .features = .{
+            .grid_columns = 1,
+            .grid_rows = 1,
+            .max_per_cell = 96,
+            .quality_level = 0.08,
+            .min_distance = 5,
+            .border = 0,
+        },
+        .minimum_tracks = 12,
+        .feature_retry_quality_factor = 1,
+        .feature_retry_min_distance_factor = 1,
+    };
+    var strict_estimator = try motion.Estimator.init(
+        std.testing.allocator,
+        base_options,
+    );
+    defer strict_estimator.deinit();
+    try std.testing.expectError(error.NotEnoughTracks, strict_estimator.estimate(
+        .{
+            .pixels = &previous,
+            .width = width,
+            .height = height,
+            .stride = width,
+        },
+        .{
+            .pixels = &current,
+            .width = width,
+            .height = height,
+            .stride = width,
+        },
+    ));
+
+    var retry_options = base_options;
+    const adaptive_defaults = motion.Options{};
+    retry_options.feature_retry_quality_factor =
+        adaptive_defaults.feature_retry_quality_factor;
+    retry_options.feature_retry_min_distance_factor =
+        adaptive_defaults.feature_retry_min_distance_factor;
+    var retry_estimator = try motion.Estimator.init(
+        std.testing.allocator,
+        retry_options,
+    );
+    defer retry_estimator.deinit();
+    const estimate = try retry_estimator.estimate(
+        .{
+            .pixels = &previous,
+            .width = width,
+            .height = height,
+            .stride = width,
+        },
+        .{
+            .pixels = &current,
+            .width = width,
+            .height = height,
+            .stride = width,
+        },
+    );
+
+    try std.testing.expect(estimate.detected_points >= 24);
+    try std.testing.expect(estimate.tracked_points >= 12);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_x),
+        estimate.transform.x,
+        0.4,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_y),
+        estimate.transform.y,
+        0.4,
+    );
+}
+
+test "native motion estimator retries after strong tracks disappear" {
+    if (!motion.native_enabled) return error.SkipZigTest;
+
+    const width = 160;
+    const height = 120;
+    var previous = [_]u8{24} ** (width * height);
+    var current = [_]u8{24} ** (width * height);
+    const shift_x = 2;
+    const shift_y = 1;
+
+    // Weak background features persist between frames, but the stronger
+    // transient features exist only in the previous frame. The conservative
+    // pass detects plenty of points and then loses them in optical flow.
+    for (0..3) |row| {
+        for (0..5) |column| {
+            const weak_left = 8 + column * 32;
+            const weak_top = 45 + row * 31;
+            for (0..6) |square_y| {
+                @memset(
+                    previous[(weak_top + square_y) * width + weak_left .. (weak_top + square_y) * width + weak_left + 6],
+                    64,
+                );
+                @memset(
+                    current[(weak_top + shift_y + square_y) * width +
+                        weak_left + shift_x .. (weak_top + shift_y + square_y) * width +
+                        weak_left + shift_x + 6],
+                    64,
+                );
+            }
+        }
+    }
+    for (0..8) |column| {
+        const transient_left = 6 + column * 19;
+        const transient_top = 8;
+        for (0..7) |square_y| {
+            @memset(
+                previous[(transient_top + square_y) * width +
+                    transient_left .. (transient_top + square_y) * width +
+                    transient_left + 7],
+                255,
+            );
+        }
+    }
+
+    const base_options = motion.Options{
+        .features = .{
+            .grid_columns = 1,
+            .grid_rows = 1,
+            .max_per_cell = 96,
+            .quality_level = 0.08,
+            .min_distance = 5,
+            .border = 0,
+        },
+        .minimum_tracks = 12,
+        .feature_retry_quality_factor = 1,
+        .feature_retry_min_distance_factor = 1,
+    };
+    const previous_frame = motion.GrayFrame{
+        .pixels = &previous,
+        .width = width,
+        .height = height,
+        .stride = width,
+    };
+    const current_frame = motion.GrayFrame{
+        .pixels = &current,
+        .width = width,
+        .height = height,
+        .stride = width,
+    };
+    var conservative_storage: [96]features.Point = undefined;
+    const conservative_points = try features.detectDistributed(
+        previous_frame.pixels,
+        previous_frame.width,
+        previous_frame.height,
+        previous_frame.stride,
+        &conservative_storage,
+        base_options.features,
+    );
+    try std.testing.expect(conservative_points.len >= 24);
+
+    var strict_estimator = try motion.Estimator.init(
+        std.testing.allocator,
+        base_options,
+    );
+    defer strict_estimator.deinit();
+    try std.testing.expectError(
+        error.NotEnoughTracks,
+        strict_estimator.estimate(previous_frame, current_frame),
+    );
+
+    var retry_options = base_options;
+    const adaptive_defaults = motion.Options{};
+    retry_options.feature_retry_quality_factor =
+        adaptive_defaults.feature_retry_quality_factor;
+    retry_options.feature_retry_min_distance_factor =
+        adaptive_defaults.feature_retry_min_distance_factor;
+    var retry_estimator = try motion.Estimator.init(
+        std.testing.allocator,
+        retry_options,
+    );
+    defer retry_estimator.deinit();
+    const estimate = try retry_estimator.estimate(
+        previous_frame,
+        current_frame,
+    );
+
+    try std.testing.expect(estimate.detected_points >= 24);
+    try std.testing.expect(estimate.tracked_points >= 12);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_x),
+        estimate.transform.x,
+        0.4,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, shift_y),
+        estimate.transform.y,
+        0.4,
+    );
+}
+
 test "native motion estimator distrusts motion confined to a small region" {
     if (!motion.native_enabled) return error.SkipZigTest;
 
@@ -1239,6 +1590,145 @@ test "native motion estimator distrusts motion confined to a small region" {
     );
     try std.testing.expect(estimate.spatial_coverage < 0.3);
     try std.testing.expect(estimate.confidence < 0.25);
+}
+
+test "native motion estimator prefers weak global background motion" {
+    if (!motion.native_enabled) return error.SkipZigTest;
+
+    const width = 160;
+    const height = 120;
+    var previous = [_]u8{24} ** (width * height);
+    var current = [_]u8{24} ** (width * height);
+    const background_shift_x = 2;
+    const background_shift_y = 1;
+    const foreground_shift_x = 8;
+    const foreground_shift_y = -3;
+
+    for (0..4) |row| {
+        for (0..5) |column| {
+            if ((row == 1 or row == 2) and
+                (column == 1 or column == 2))
+            {
+                continue;
+            }
+            const left = 8 + column * 32;
+            const top = 8 + row * 28;
+            for (0..6) |square_y| {
+                @memset(
+                    previous[(top + square_y) * width + left .. (top + square_y) * width + left + 6],
+                    64,
+                );
+                @memset(
+                    current[(top + background_shift_y + square_y) * width +
+                        left + background_shift_x .. (top + background_shift_y + square_y) * width +
+                        left + background_shift_x + 6],
+                    64,
+                );
+            }
+        }
+    }
+
+    for (0..2) |row| {
+        for (0..2) |column| {
+            const left = 52 + column * 16;
+            const top = 44 + row * 16;
+            const current_left = left + foreground_shift_x;
+            const current_top = top - @abs(foreground_shift_y);
+            for (0..7) |square_y| {
+                @memset(
+                    previous[(top + square_y) * width + left .. (top + square_y) * width + left + 7],
+                    255,
+                );
+                @memset(
+                    current[(current_top + square_y) * width +
+                        current_left .. (current_top + square_y) * width +
+                        current_left + 7],
+                    255,
+                );
+            }
+        }
+    }
+
+    const base_options = motion.Options{
+        .features = .{
+            .grid_columns = 1,
+            .grid_rows = 1,
+            .max_per_cell = 96,
+            .quality_level = 0.08,
+            .min_distance = 5,
+            .border = 0,
+        },
+        .minimum_tracks = 8,
+        .feature_retry_quality_factor = 1,
+        .feature_retry_min_distance_factor = 1,
+    };
+    const previous_frame = motion.GrayFrame{
+        .pixels = &previous,
+        .width = width,
+        .height = height,
+        .stride = width,
+    };
+    const current_frame = motion.GrayFrame{
+        .pixels = &current,
+        .width = width,
+        .height = height,
+        .stride = width,
+    };
+
+    var strict_estimator = try motion.Estimator.init(
+        std.testing.allocator,
+        base_options,
+    );
+    defer strict_estimator.deinit();
+    const foreground_estimate = try strict_estimator.estimate(
+        previous_frame,
+        current_frame,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, foreground_shift_x),
+        foreground_estimate.transform.x,
+        0.5,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, foreground_shift_y),
+        foreground_estimate.transform.y,
+        0.5,
+    );
+    try std.testing.expect(foreground_estimate.confidence < 0.25);
+
+    var retry_options = base_options;
+    const adaptive_defaults = motion.Options{};
+    retry_options.feature_retry_quality_factor =
+        adaptive_defaults.feature_retry_quality_factor;
+    retry_options.feature_retry_min_distance_factor =
+        adaptive_defaults.feature_retry_min_distance_factor;
+    var retry_estimator = try motion.Estimator.init(
+        std.testing.allocator,
+        retry_options,
+    );
+    defer retry_estimator.deinit();
+    const background_estimate = try retry_estimator.estimate(
+        previous_frame,
+        current_frame,
+    );
+
+    try std.testing.expectApproxEqAbs(
+        @as(f64, background_shift_x),
+        background_estimate.transform.x,
+        0.5,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, background_shift_y),
+        background_estimate.transform.y,
+        0.5,
+    );
+    try std.testing.expect(
+        background_estimate.confidence > foreground_estimate.confidence,
+    );
+    try std.testing.expect(
+        background_estimate.confidence >=
+            adaptive_defaults.feature_retry_confidence_threshold,
+    );
 }
 
 test "native BGRA warper preserves an identity frame" {
@@ -1349,6 +1839,36 @@ test "native decoder emits full-resolution BGRA render frames" {
         @as(usize, frame.width) * 4,
         frame.stride,
     );
+    try std.testing.expectEqual(
+        frame.stride * @as(usize, frame.height),
+        frame.pixels.len,
+    );
+}
+
+test "native decoder emits scaled BGRA analysis frames" {
+    if (!decoder.native_enabled) return error.SkipZigTest;
+    if (build_options.test_video.len == 0) return error.SkipZigTest;
+
+    var video_decoder = try decoder.Decoder.open(
+        std.testing.allocator,
+        build_options.test_video,
+        .{
+            .max_analysis_dimension = 64,
+            .output_format = .bgra8_analysis,
+        },
+    );
+    defer video_decoder.deinit();
+
+    const frame = try video_decoder.readFrame() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(video_decoder.info.analysis.width, frame.width);
+    try std.testing.expectEqual(video_decoder.info.analysis.height, frame.height);
+    try std.testing.expect(@max(frame.width, frame.height) <= 64);
+    try std.testing.expectEqual(
+        decoder.PixelFormat.bgra8_analysis,
+        frame.format,
+    );
+    try std.testing.expectEqual(@as(usize, frame.width) * 4, frame.stride);
     try std.testing.expectEqual(
         frame.stride * @as(usize, frame.height),
         frame.pixels.len,
@@ -1603,6 +2123,14 @@ test "native exporter completes the full transactional pipeline" {
     defer std.testing.allocator.free(output_path);
     defer deleteTestFile(output_path);
     deleteTestFile(output_path);
+    const diagnostics_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}.csv",
+        .{output_path},
+    );
+    defer std.testing.allocator.free(diagnostics_path);
+    defer deleteTestFile(diagnostics_path);
+    deleteTestFile(diagnostics_path);
 
     const result = try exporter.Exporter.run(
         std.testing.allocator,
@@ -1616,6 +2144,7 @@ test "native exporter completes the full transactional pipeline" {
                 .crop = .{ .max_zoom = 2 },
             },
             .encoder = .{ .crf = 16, .preset = "slow" },
+            .diagnostics_path = diagnostics_path,
         },
     );
     try std.testing.expectEqual(build_options.test_video_frames, result.frames);
@@ -1627,6 +2156,21 @@ test "native exporter completes the full transactional pipeline" {
     }
     const stat = try std.fs.cwd().statFile(output_path);
     try std.testing.expect(stat.size > 0);
+    const diagnostics_contents = try std.fs.cwd().readFileAlloc(
+        std.testing.allocator,
+        diagnostics_path,
+        1024 * 1024,
+    );
+    defer std.testing.allocator.free(diagnostics_contents);
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        diagnostics_contents,
+        "frame_index,pts,timestamp_seconds",
+    ));
+    try std.testing.expectEqual(
+        result.frames + 1,
+        std.mem.count(u8, diagnostics_contents, "\n"),
+    );
 }
 
 const RenderCounter = struct {

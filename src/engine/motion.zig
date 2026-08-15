@@ -28,7 +28,17 @@ pub const RansacOptions = struct {
 
 pub const Options = struct {
     features: features.Options = .{},
+    /// Multiplier applied to Shi-Tomasi's contrast threshold on a sparse pass.
+    feature_retry_quality_factor: f64 = 0.25,
+    /// Multiplier applied to the corner spacing on a sparse pass.
+    feature_retry_min_distance_factor: f64 = 0.6,
+    /// Retry a valid but weak motion hypothesis below this confidence.
+    feature_retry_confidence_threshold: f32 = 0.25,
     optical_flow: OpticalFlowOptions = .{},
+    /// Added to the odd LK window size only during an adaptive retry.
+    optical_flow_retry_window_increment: u16 = 10,
+    /// Additional LK pyramid levels used only during an adaptive retry.
+    optical_flow_retry_pyramid_levels: u8 = 1,
     ransac: RansacOptions = .{},
     minimum_tracks: u16 = 12,
     maximum_translation_fraction: f64 = 0.35,
@@ -52,6 +62,11 @@ pub const Estimate = struct {
     inlier_points: u32,
     residual_px: f32,
     spatial_coverage: f32,
+};
+
+const FeatureDetection = struct {
+    points: []features.Point,
+    relaxed: bool,
 };
 
 pub const MotionError = error{
@@ -134,57 +149,98 @@ pub const Estimator = struct {
             return error.FrameDimensionsMismatch;
         }
 
-        const detected = try features.detectDistributed(
-            previous.pixels,
-            previous.width,
-            previous.height,
-            previous.stride,
-            self.previous_points,
-            self.options.features,
-        );
+        const detection = try self.detectFeatures(previous);
+        var detected = detection.points;
+        var used_relaxed_detection = detection.relaxed;
         if (detected.len < @as(usize, self.options.minimum_tracks)) {
             return error.NotEnoughTracks;
         }
 
-        const flow_status = cv.axia_cv_track_lk_forward_backward_gray8(
-            previous.pixels.ptr,
-            previous.stride,
-            current.pixels.ptr,
-            current.stride,
-            @intCast(previous.width),
-            @intCast(previous.height),
-            @ptrCast(detected.ptr),
-            detected.len,
-            &.{
-                .window_size = @intCast(self.options.optical_flow.window_size),
-                .max_pyramid_level = @intCast(
-                    self.options.optical_flow.max_pyramid_level,
-                ),
-                .max_iterations = @intCast(
-                    self.options.optical_flow.max_iterations,
-                ),
-                .epsilon = self.options.optical_flow.epsilon,
-                .min_eigen_threshold = self.options.optical_flow.min_eigen_threshold,
-            },
-            @ptrCast(self.current_points.ptr),
-            @ptrCast(self.backward_points.ptr),
-            self.forward_errors.ptr,
-            self.status.ptr,
-            self.current_points.len,
-        );
-        if (flow_status != cv.AXIA_CV_OK) {
-            return mapStatus("calculando o fluxo óptico", flow_status);
-        }
-
-        const tracked_count = self.filterTracks(
+        var tracked_count = try self.trackFeatures(
+            previous,
+            current,
             detected,
-            current.width,
-            current.height,
+            self.options.optical_flow,
         );
+        // A plentiful detection can still collapse during optical flow after
+        // local occlusion or blur. Give weaker persistent texture one chance.
+        if (tracked_count < @as(usize, self.options.minimum_tracks) and
+            self.adaptiveRetryWouldChange(detection.relaxed))
+        {
+            detected = try self.detectRelaxedFeatures(previous);
+            used_relaxed_detection = true;
+            if (detected.len >= @as(usize, self.options.minimum_tracks)) {
+                tracked_count = try self.trackFeatures(
+                    previous,
+                    current,
+                    detected,
+                    self.retryOpticalFlowOptions(),
+                );
+            }
+        }
         if (tracked_count < @as(usize, self.options.minimum_tracks)) {
             return error.NotEnoughTracks;
         }
 
+        const initial_estimate = self.estimateTracked(
+            previous,
+            detected,
+            tracked_count,
+        ) catch |initial_error| {
+            if (self.adaptiveRetryWouldChange(used_relaxed_detection)) {
+                const retry = self.estimateRelaxed(
+                    previous,
+                    current,
+                ) catch return initial_error;
+                if (retry) |value| return value;
+            }
+            return initial_error;
+        };
+        if (!self.adaptiveRetryWouldChange(used_relaxed_detection) or
+            initial_estimate.confidence >=
+            self.options.feature_retry_confidence_threshold)
+        {
+            return initial_estimate;
+        }
+
+        const retry = self.estimateRelaxed(
+            previous,
+            current,
+        ) catch return initial_estimate;
+        const retry_estimate = retry orelse return initial_estimate;
+        return if (retry_estimate.confidence > initial_estimate.confidence)
+            retry_estimate
+        else
+            initial_estimate;
+    }
+
+    fn estimateRelaxed(
+        self: *Estimator,
+        previous: GrayFrame,
+        current: GrayFrame,
+    ) MotionError!?Estimate {
+        const detected = try self.detectRelaxedFeatures(previous);
+        if (detected.len < @as(usize, self.options.minimum_tracks)) {
+            return null;
+        }
+        const tracked_count = try self.trackFeatures(
+            previous,
+            current,
+            detected,
+            self.retryOpticalFlowOptions(),
+        );
+        if (tracked_count < @as(usize, self.options.minimum_tracks)) {
+            return null;
+        }
+        return try self.estimateTracked(previous, detected, tracked_count);
+    }
+
+    fn estimateTracked(
+        self: *Estimator,
+        previous: GrayFrame,
+        detected: []const features.Point,
+        tracked_count: usize,
+    ) MotionError!Estimate {
         var transform: cv.AxiaSimilarityTransform = undefined;
         var inlier_count: usize = 0;
         const estimation_status = cv.axia_cv_estimate_similarity_ransac(
@@ -260,6 +316,125 @@ pub const Estimator = struct {
         };
     }
 
+    fn trackFeatures(
+        self: *Estimator,
+        previous: GrayFrame,
+        current: GrayFrame,
+        detected: []const features.Point,
+        optical_flow: OpticalFlowOptions,
+    ) MotionError!usize {
+        const flow_status = cv.axia_cv_track_lk_forward_backward_gray8(
+            previous.pixels.ptr,
+            previous.stride,
+            current.pixels.ptr,
+            current.stride,
+            @intCast(previous.width),
+            @intCast(previous.height),
+            @ptrCast(detected.ptr),
+            detected.len,
+            &.{
+                .window_size = @intCast(optical_flow.window_size),
+                .max_pyramid_level = @intCast(
+                    optical_flow.max_pyramid_level,
+                ),
+                .max_iterations = @intCast(
+                    optical_flow.max_iterations,
+                ),
+                .epsilon = optical_flow.epsilon,
+                .min_eigen_threshold = optical_flow.min_eigen_threshold,
+            },
+            @ptrCast(self.current_points.ptr),
+            @ptrCast(self.backward_points.ptr),
+            self.forward_errors.ptr,
+            self.status.ptr,
+            self.current_points.len,
+        );
+        if (flow_status != cv.AXIA_CV_OK) {
+            return mapStatus("calculando o fluxo óptico", flow_status);
+        }
+        return self.filterTracks(
+            detected,
+            current.width,
+            current.height,
+        );
+    }
+
+    /// A first pass keeps the normal detector conservative. When it finds too
+    /// few points to absorb the losses of optical flow, retry in the same
+    /// preallocated buffer with lower contrast and spacing thresholds.
+    fn detectFeatures(
+        self: *Estimator,
+        previous: GrayFrame,
+    ) MotionError!FeatureDetection {
+        const detected = try features.detectDistributed(
+            previous.pixels,
+            previous.width,
+            previous.height,
+            previous.stride,
+            self.previous_points,
+            self.options.features,
+        );
+        const capacity = self.previous_points.len;
+        const desired_margin = @min(
+            capacity,
+            @as(usize, self.options.minimum_tracks) * 2,
+        );
+        if (detected.len >= desired_margin or !self.featureRetryEnabled()) {
+            return .{ .points = detected, .relaxed = false };
+        }
+
+        return .{
+            .points = try self.detectRelaxedFeatures(previous),
+            .relaxed = true,
+        };
+    }
+
+    fn detectRelaxedFeatures(
+        self: *Estimator,
+        previous: GrayFrame,
+    ) MotionError![]features.Point {
+        var retry_options = self.options.features;
+        retry_options.quality_level *=
+            self.options.feature_retry_quality_factor;
+        retry_options.min_distance *=
+            self.options.feature_retry_min_distance_factor;
+        return features.detectDistributed(
+            previous.pixels,
+            previous.width,
+            previous.height,
+            previous.stride,
+            self.previous_points,
+            retry_options,
+        );
+    }
+
+    fn featureRetryEnabled(self: *const Estimator) bool {
+        return self.options.feature_retry_quality_factor < 1 or
+            self.options.feature_retry_min_distance_factor < 1;
+    }
+
+    fn opticalFlowRetryEnabled(self: *const Estimator) bool {
+        return self.options.optical_flow_retry_window_increment > 0 or
+            self.options.optical_flow_retry_pyramid_levels > 0;
+    }
+
+    fn adaptiveRetryWouldChange(
+        self: *const Estimator,
+        features_already_relaxed: bool,
+    ) bool {
+        return self.opticalFlowRetryEnabled() or
+            (!features_already_relaxed and self.featureRetryEnabled());
+    }
+
+    fn retryOpticalFlowOptions(self: *const Estimator) OpticalFlowOptions {
+        var options = self.options.optical_flow;
+        options.window_size +=
+            self.options.optical_flow_retry_window_increment;
+        options.max_pyramid_level +=
+            self.options.optical_flow_retry_pyramid_levels;
+        return options;
+    }
+
     fn filterTracks(
         self: *Estimator,
         detected: []const features.Point,
@@ -332,8 +507,32 @@ pub const Estimator = struct {
 
 fn validateOptions(options: Options) MotionError!void {
     const capacity = try features.requiredCapacity(options.features);
+    const retry_quality_level = options.features.quality_level *
+        options.feature_retry_quality_factor;
+    _ = std.math.add(
+        u16,
+        options.optical_flow.window_size,
+        options.optical_flow_retry_window_increment,
+    ) catch return error.InvalidOptions;
+    _ = std.math.add(
+        u8,
+        options.optical_flow.max_pyramid_level,
+        options.optical_flow_retry_pyramid_levels,
+    ) catch return error.InvalidOptions;
     if (options.minimum_tracks < 3 or
         @as(usize, options.minimum_tracks) > capacity or
+        !std.math.isFinite(options.feature_retry_quality_factor) or
+        options.feature_retry_quality_factor <= 0 or
+        options.feature_retry_quality_factor > 1 or
+        !std.math.isFinite(options.feature_retry_min_distance_factor) or
+        options.feature_retry_min_distance_factor <= 0 or
+        options.feature_retry_min_distance_factor > 1 or
+        !std.math.isFinite(options.feature_retry_confidence_threshold) or
+        options.feature_retry_confidence_threshold < 0 or
+        options.feature_retry_confidence_threshold > 1 or
+        options.optical_flow_retry_window_increment % 2 != 0 or
+        !std.math.isFinite(retry_quality_level) or
+        retry_quality_level <= 0 or
         options.optical_flow.window_size < 3 or
         options.optical_flow.window_size % 2 == 0 or
         options.optical_flow.max_iterations == 0 or
@@ -605,5 +804,20 @@ test "motion plausibility rejects degenerate frame transforms" {
     try std.testing.expectError(error.InvalidOptions, validateOptions(.{
         .minimum_scale = 1.1,
         .maximum_scale = 1.0,
+    }));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .feature_retry_quality_factor = 0,
+    }));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .feature_retry_min_distance_factor = std.math.nan(f64),
+    }));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .feature_retry_confidence_threshold = 1.01,
+    }));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .optical_flow_retry_window_increment = 1,
+    }));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{
+        .optical_flow = .{ .window_size = std.math.maxInt(u16) },
     }));
 }

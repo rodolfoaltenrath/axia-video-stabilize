@@ -11,6 +11,8 @@ pub const PreviewSize = struct {
     height: u32,
 };
 
+pub const maximum_preview_fps: f64 = 30;
+
 const supported_extensions = [_][]const u8{
     ".mp4",
     ".mov",
@@ -60,6 +62,15 @@ pub fn fitPreviewSize(
             @as(f64, @floatFromInt(source_height)) * scale,
         )))),
     };
+}
+
+/// Keeps the interactive preview light without changing the source or export
+/// frame rate. Invalid metadata falls back to the preview ceiling.
+pub fn fitPreviewFrameRate(source_fps: f64) f64 {
+    if (!std.math.isFinite(source_fps) or source_fps <= 0) {
+        return maximum_preview_fps;
+    }
+    return @min(source_fps, maximum_preview_fps);
 }
 
 fn evenDimension(value: u32) u32 {
