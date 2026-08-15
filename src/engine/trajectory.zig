@@ -5,6 +5,7 @@ pub const TrajectoryError = error{
     InvalidIntegrationOptions,
     InvalidTrajectoryTimestamp,
     InvalidSmoothingWindow,
+    InvalidSmoothingPivot,
     TrajectorySegmentOverflow,
 };
 
@@ -39,6 +40,11 @@ pub const Correction = struct {
     y: f64 = 0,
     angle: f64 = 0,
     scale: f64 = 1,
+};
+
+pub const SmoothingPivot = struct {
+    x: f64 = 0,
+    y: f64 = 0,
 };
 
 /// Integrates the analyzer's canonical per-frame records into camera poses.
@@ -408,8 +414,28 @@ pub fn smoothTimed(
     poses: []const Pose,
     radius_seconds: f64,
 ) (TrajectoryError || std.mem.Allocator.Error)![]Pose {
+    return smoothTimedAroundPivot(
+        allocator,
+        poses,
+        radius_seconds,
+        .{},
+    );
+}
+
+/// Smooths translation at `pivot` instead of at the image origin. Using the
+/// frame center keeps a steady rotation or zoom from creating a curved,
+/// artificial translation trajectory merely because the origin is far away.
+pub fn smoothTimedAroundPivot(
+    allocator: std.mem.Allocator,
+    poses: []const Pose,
+    radius_seconds: f64,
+    pivot: SmoothingPivot,
+) (TrajectoryError || std.mem.Allocator.Error)![]Pose {
     if (!std.math.isFinite(radius_seconds) or radius_seconds < 0) {
         return error.InvalidSmoothingWindow;
+    }
+    if (!std.math.isFinite(pivot.x) or !std.math.isFinite(pivot.y)) {
+        return error.InvalidSmoothingPivot;
     }
     const output = try allocator.alloc(Pose, poses.len);
     if (poses.len == 0) return output;
@@ -450,12 +476,12 @@ pub fn smoothTimed(
             const weight = temporal_weight * confidence_weight;
             fit.add(
                 sample.timestamp_seconds - pose.timestamp_seconds,
-                sample,
+                toPivotSpace(sample, pivot),
                 weight,
             );
         }
 
-        output[index] = .{
+        output[index] = fromPivotSpace(.{
             .x = fit.estimateAtCenter(fit.weighted_x, fit.weighted_time_x),
             .y = fit.estimateAtCenter(fit.weighted_y, fit.weighted_time_y),
             .angle = fit.estimateAtCenter(
@@ -469,9 +495,29 @@ pub fn smoothTimed(
             .confidence = pose.confidence,
             .segment = pose.segment,
             .timestamp_seconds = pose.timestamp_seconds,
-        };
+        }, pivot);
     }
     return output;
+}
+
+fn toPivotSpace(pose: Pose, pivot: SmoothingPivot) Pose {
+    const scale = @exp(pose.log_scale);
+    const cosine = @cos(pose.angle) * scale;
+    const sine = @sin(pose.angle) * scale;
+    var converted = pose;
+    converted.x = cosine * pivot.x - sine * pivot.y + pose.x - pivot.x;
+    converted.y = sine * pivot.x + cosine * pivot.y + pose.y - pivot.y;
+    return converted;
+}
+
+fn fromPivotSpace(pose: Pose, pivot: SmoothingPivot) Pose {
+    const scale = @exp(pose.log_scale);
+    const cosine = @cos(pose.angle) * scale;
+    const sine = @sin(pose.angle) * scale;
+    var converted = pose;
+    converted.x = pose.x + pivot.x - cosine * pivot.x + sine * pivot.y;
+    converted.y = pose.y + pivot.y - sine * pivot.x - cosine * pivot.y;
+    return converted;
 }
 
 pub fn buildCorrections(

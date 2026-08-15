@@ -530,6 +530,57 @@ test "smoothing preserves constant camera velocity at scene edges" {
     }
 }
 
+test "centered smoothing preserves steady rotation and zoom" {
+    const pivot = trajectory.SmoothingPivot{ .x = 479.5, .y = 269.5 };
+    const timestamps = [_]f64{ 0.0, 0.1, 0.4, 1.0 };
+    var poses: [timestamps.len]trajectory.Pose = undefined;
+    for (timestamps, &poses) |timestamp, *pose| {
+        const angle = 0.05 * timestamp;
+        const log_scale = 0.01 * timestamp;
+        const scale = @exp(log_scale);
+        const cosine = @cos(angle) * scale;
+        const sine = @sin(angle) * scale;
+        pose.* = .{
+            .x = pivot.x - cosine * pivot.x + sine * pivot.y,
+            .y = pivot.y - sine * pivot.x - cosine * pivot.y,
+            .angle = angle,
+            .log_scale = log_scale,
+            .timestamp_seconds = timestamp,
+        };
+    }
+
+    const smoothed = try trajectory.smoothTimedAroundPivot(
+        std.testing.allocator,
+        &poses,
+        0.5,
+        pivot,
+    );
+    defer std.testing.allocator.free(smoothed);
+
+    for (poses, smoothed) |raw, smooth| {
+        try std.testing.expectApproxEqAbs(raw.x, smooth.x, 0.000001);
+        try std.testing.expectApproxEqAbs(raw.y, smooth.y, 0.000001);
+        try std.testing.expectApproxEqAbs(raw.angle, smooth.angle, 0.000001);
+        try std.testing.expectApproxEqAbs(
+            raw.log_scale,
+            smooth.log_scale,
+            0.000001,
+        );
+    }
+}
+
+test "centered smoothing rejects a non-finite pivot" {
+    try std.testing.expectError(
+        error.InvalidSmoothingPivot,
+        trajectory.smoothTimedAroundPivot(
+            std.testing.allocator,
+            &.{},
+            1,
+            .{ .x = std.math.inf(f64) },
+        ),
+    );
+}
+
 test "frame corrections include inverse scale delta" {
     const raw = [_]trajectory.Pose{
         .{ .x = 4, .y = -2, .angle = 0.2, .log_scale = @log(2.0) },

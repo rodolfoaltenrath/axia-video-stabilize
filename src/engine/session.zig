@@ -158,10 +158,17 @@ const NativeSession = struct {
             options.trajectory_integration,
         );
         errdefer allocator.free(raw_trajectory);
-        const smoothed_trajectory = try trajectory.smoothTimed(
+        const analysis_center = trajectory.SmoothingPivot{
+            .x = (@as(f64, @floatFromInt(video_info.analysis.width)) - 1.0) /
+                2.0,
+            .y = (@as(f64, @floatFromInt(video_info.analysis.height)) - 1.0) /
+                2.0,
+        };
+        const smoothed_trajectory = try trajectory.smoothTimedAroundPivot(
             allocator,
             raw_trajectory,
             options.smoothing_radius_seconds,
+            analysis_center,
         );
         errdefer allocator.free(smoothed_trajectory);
         const analysis_corrections = try trajectory.buildCorrections(

@@ -383,9 +383,10 @@ fn transformIsPlausible(
         transform.scale <= options.maximum_scale;
 }
 
-/// Measures how broadly the RANSAC inliers support the global transform. A
-/// foreground object occupying a small region receives a low score even when
-/// all of its local tracks agree perfectly.
+/// Measures how broadly the RANSAC inliers support the global transform. The
+/// bounding box rewards coverage of the image while the covariance determinant
+/// requires support in two independent directions. A compact foreground object
+/// or a long line therefore receives a low score even when its tracks agree.
 fn calculateSpatialCoverage(
     points: []const features.Point,
     inlier_mask: []const u8,
@@ -398,36 +399,88 @@ fn calculateSpatialCoverage(
         return 0;
     }
 
+    const usable_width = @as(f64, @floatFromInt(@max(width - 1, 1)));
+    const usable_height = @as(f64, @floatFromInt(@max(height - 1, 1)));
     var minimum_x = std.math.inf(f64);
     var minimum_y = std.math.inf(f64);
     var maximum_x = -std.math.inf(f64);
     var maximum_y = -std.math.inf(f64);
+    var sum_x: f64 = 0;
+    var sum_y: f64 = 0;
     var count: usize = 0;
     for (points, inlier_mask) |point, is_inlier| {
         if (is_inlier == 0 or !isFinitePoint(point)) continue;
-        const x: f64 = @floatCast(point.x);
-        const y: f64 = @floatCast(point.y);
+        const x = std.math.clamp(
+            @as(f64, @floatCast(point.x)) / usable_width,
+            0,
+            1,
+        );
+        const y = std.math.clamp(
+            @as(f64, @floatCast(point.y)) / usable_height,
+            0,
+            1,
+        );
         minimum_x = @min(minimum_x, x);
         minimum_y = @min(minimum_y, y);
         maximum_x = @max(maximum_x, x);
         maximum_y = @max(maximum_y, y);
+        sum_x += x;
+        sum_y += y;
         count += 1;
     }
     if (count < 3) return 0;
 
-    const usable_width = @as(f64, @floatFromInt(@max(width - 1, 1)));
-    const usable_height = @as(f64, @floatFromInt(@max(height - 1, 1)));
     const horizontal = std.math.clamp(
-        (maximum_x - minimum_x) / usable_width,
+        maximum_x - minimum_x,
         0,
         1,
     );
     const vertical = std.math.clamp(
-        (maximum_y - minimum_y) / usable_height,
+        maximum_y - minimum_y,
         0,
         1,
     );
-    return @sqrt(horizontal * vertical);
+    const bounding_box_coverage = @sqrt(horizontal * vertical);
+
+    const count_float = @as(f64, @floatFromInt(count));
+    const mean_x = sum_x / count_float;
+    const mean_y = sum_y / count_float;
+    var variance_x: f64 = 0;
+    var variance_y: f64 = 0;
+    var covariance_xy: f64 = 0;
+    for (points, inlier_mask) |point, is_inlier| {
+        if (is_inlier == 0 or !isFinitePoint(point)) continue;
+        const normalized_x = std.math.clamp(
+            @as(f64, @floatCast(point.x)) / usable_width,
+            0,
+            1,
+        );
+        const normalized_y = std.math.clamp(
+            @as(f64, @floatCast(point.y)) / usable_height,
+            0,
+            1,
+        );
+        const dx = normalized_x - mean_x;
+        const dy = normalized_y - mean_y;
+        variance_x += dx * dx;
+        variance_y += dy * dy;
+        covariance_xy += dx * dy;
+    }
+    variance_x /= count_float;
+    variance_y /= count_float;
+    covariance_xy /= count_float;
+    const covariance_determinant = @max(
+        0,
+        variance_x * variance_y - covariance_xy * covariance_xy,
+    );
+    // A uniform distribution over the unit frame has variance 1/12 on each
+    // axis, hence 12 * sqrt(det) normalizes that useful reference to one.
+    const two_dimensional_coverage = std.math.clamp(
+        12.0 * @sqrt(covariance_determinant),
+        0,
+        1,
+    );
+    return @sqrt(bounding_box_coverage * two_dimensional_coverage);
 }
 
 fn validateFrame(frame: GrayFrame) MotionError!void {
@@ -499,6 +552,25 @@ test "spatial coverage rewards inliers spread across the frame" {
     );
     try std.testing.expect(spread_score > 0.85);
     try std.testing.expect(clustered_score < 0.1);
+}
+
+test "spatial coverage rejects inliers aligned across the frame" {
+    const diagonal = [_]features.Point{
+        .{ .x = 5, .y = 5 },
+        .{ .x = 25, .y = 25 },
+        .{ .x = 50, .y = 50 },
+        .{ .x = 75, .y = 75 },
+        .{ .x = 95, .y = 95 },
+    };
+    const inliers = [_]u8{1} ** diagonal.len;
+
+    const score = calculateSpatialCoverage(
+        &diagonal,
+        &inliers,
+        101,
+        101,
+    );
+    try std.testing.expect(score < 0.05);
 }
 
 test "motion plausibility rejects degenerate frame transforms" {
