@@ -1,5 +1,6 @@
 const std = @import("std");
 const rl = @import("raylib");
+const build_options = @import("build_options");
 const state_mod = @import("../app_state.zig");
 const components = @import("components.zig");
 const preview_player = @import("preview_player.zig");
@@ -70,6 +71,13 @@ fn drawTopBar(width: f32, height: f32, snapshot: state_mod.Snapshot) TopBarActio
     rl.drawRectangleRounded(mark, 0.28, 8, theme.accent);
     components.textStrong("A", mark.x + 11, mark.y + 7, 21, theme.text);
     components.textStrong("AXIA", 70, 17, 18, theme.text);
+    var version_buffer: [32]u8 = undefined;
+    const version_label = std.fmt.bufPrintZ(
+        &version_buffer,
+        "v{s}",
+        .{build_options.version},
+    ) catch "versão inválida";
+    components.text(version_label, 124, 21, 9, theme.text_subtle);
     components.text("ESTABILIZAÇÃO DE VÍDEO", 70, 40, 10, theme.text_muted);
 
     const busy = snapshot.phase.isBusy();
@@ -637,7 +645,21 @@ fn formatProcessingMetrics(
     buffer: *[96]u8,
     snapshot: state_mod.Snapshot,
 ) [:0]const u8 {
-    const total = snapshot.total_frames orelse return "";
+    const total = snapshot.total_frames orelse {
+        if (snapshot.processed_frame == 0) return "";
+        if (snapshot.processing_speed <= 0) {
+            return std.fmt.bufPrintZ(
+                buffer,
+                "{d} frames",
+                .{snapshot.processed_frame},
+            ) catch "";
+        }
+        return std.fmt.bufPrintZ(
+            buffer,
+            "{d} frames | {d:.1} fps",
+            .{ snapshot.processed_frame, snapshot.processing_speed },
+        ) catch "";
+    };
     if (snapshot.processing_speed <= 0 or snapshot.processed_frame >= total) {
         return std.fmt.bufPrintZ(
             buffer,

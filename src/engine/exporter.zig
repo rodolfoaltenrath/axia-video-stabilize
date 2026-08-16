@@ -186,6 +186,8 @@ const NativeExporter = struct {
         });
         var mux_observer = MuxObserver{ .observer = options.observer };
         var mux_options = options.muxer;
+        mux_options.display_rotation_degrees =
+            analysis.video_info.display_rotation_degrees;
         mux_options.observer = .{
             .context = &mux_observer,
             .on_progress = MuxObserver.onProgress,

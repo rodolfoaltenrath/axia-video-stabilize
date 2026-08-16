@@ -106,6 +106,30 @@ pub fn orientedDimensions(
     return .{ .width = source.height, .height = source.width };
 }
 
+pub fn estimateFrameCount(
+    reported_frames: i64,
+    frame_rate: ?types.Rational,
+    duration_seconds: ?f64,
+) ?u64 {
+    if (reported_frames > 0) return @intCast(reported_frames);
+    const rate = frame_rate orelse return null;
+    const duration = duration_seconds orelse return null;
+    if (rate.numerator <= 0 or rate.denominator <= 0 or
+        !std.math.isFinite(duration) or duration <= 0)
+    {
+        return null;
+    }
+    const fps = @as(f64, @floatFromInt(rate.numerator)) /
+        @as(f64, @floatFromInt(rate.denominator));
+    const estimate = @round(duration * fps);
+    if (!std.math.isFinite(estimate) or estimate < 1 or
+        estimate > @as(f64, @floatFromInt(std.math.maxInt(u64))))
+    {
+        return null;
+    }
+    return @intFromFloat(estimate);
+}
+
 /// Borrowed frame view. Pixel memory remains owned by `Decoder` and is valid
 /// only until the next `readFrame` call or `deinit`.
 pub const FrameView = struct {
@@ -315,10 +339,6 @@ const NativeDecoder = struct {
             ffmpeg.av_packet_free(&value);
         }
 
-        const estimated_frame_count: ?u64 = if (stream.*.nb_frames > 0)
-            @intCast(stream.*.nb_frames)
-        else
-            null;
         const guessed_rate = ffmpeg.av_guess_frame_rate(
             format_context,
             stream,
@@ -344,6 +364,11 @@ const NativeDecoder = struct {
                 @as(f64, ffmpeg.AV_TIME_BASE)
         else
             null;
+        const estimated_frame_count = estimateFrameCount(
+            stream.*.nb_frames,
+            frame_rate,
+            duration_seconds,
+        );
 
         return .{
             .allocator = allocator,
@@ -682,6 +707,26 @@ test "display dimensions follow quarter-turn metadata" {
     try std.testing.expectEqual(
         landscape,
         orientedDimensions(landscape, std.math.nan(f64)),
+    );
+}
+
+test "frame count falls back to duration and frame rate" {
+    const rate = types.Rational{ .numerator = 30, .denominator = 1 };
+    try std.testing.expectEqual(
+        @as(?u64, 120),
+        estimateFrameCount(120, null, null),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 60),
+        estimateFrameCount(0, rate, 2.003),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        estimateFrameCount(0, rate, std.math.nan(f64)),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        estimateFrameCount(0, null, 2),
     );
 }
 

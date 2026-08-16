@@ -138,6 +138,8 @@ fn messageForError(err: anyerror) []const u8 {
         error.OpenInputFailed, error.StreamInfoFailed, error.VideoStreamNotFound => "Não foi possível abrir o vídeo selecionado.",
         error.EncoderNotFound => "Nenhum encoder H.264 compatível foi encontrado no FFmpeg.",
         error.HeaderWriteFailed => "O contêiner MP4 rejeitou um dos streams de vídeo ou áudio.",
+        error.TranscoderNotFound => "Instale o FFmpeg para converter o áudio deste vídeo.",
+        error.AudioTranscodeFailed => "Não foi possível converter o áudio para AAC.",
         error.PacketWriteFailed, error.TrailerWriteFailed, error.PublishFailed => "Não foi possível finalizar o MP4 estabilizado.",
         else => "Falha inesperada no pipeline de estabilização.",
     };
@@ -189,19 +191,17 @@ const NativeProgress = struct {
             return;
         }
 
-        const total = @max(
-            progress.total_frames orelse 0,
-            @max(progress.processed_frames, 1),
-        );
-        const ratio: f32 =
+        const ratio: f32 = if (progress.total_frames) |estimated|
             @floatCast(@as(f64, @floatFromInt(progress.processed_frames)) /
-            @as(f64, @floatFromInt(total)));
+                @as(f64, @floatFromInt(@max(estimated, 1))))
+        else
+            0;
         const speed = self.measureSpeed(progress);
         self.state.updateFrameProgress(
             phase,
             start + (end - start) * std.math.clamp(ratio, 0.0, 1.0),
             progress.processed_frames,
-            total,
+            progress.total_frames,
             speed,
         );
     }

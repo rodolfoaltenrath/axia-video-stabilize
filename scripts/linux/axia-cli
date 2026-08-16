@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+axia_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+export LD_LIBRARY_PATH="${axia_dir}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+if [[ -f "${axia_dir}/lib/flexiblas/libflexiblas_netlib.so" ]]; then
+    export FLEXIBLAS_LIBRARY_PATH="${axia_dir}/lib/flexiblas"
+    export FLEXIBLAS="${axia_dir}/lib/flexiblas/libflexiblas_netlib.so"
+fi
+exec "${axia_dir}/libexec/axia-cli" "$@"

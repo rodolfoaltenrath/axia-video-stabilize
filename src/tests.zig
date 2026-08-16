@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const app_state = @import("app_state.zig");
 const media = @import("core/media.zig");
 const file_dialog = @import("platform/file_dialog.zig");
+const ffmpeg_command = @import("platform/ffmpeg_command.zig");
 const engine = @import("engine/engine.zig");
 const analyzer = engine.analyzer;
 const crop = engine.crop;
@@ -20,6 +21,7 @@ const warp = engine.warp;
 
 comptime {
     _ = file_dialog;
+    _ = ffmpeg_command;
 }
 
 test "derives stabilized output beside source" {
@@ -137,6 +139,16 @@ test "muxing progress clears frame-specific rendering metrics" {
     try std.testing.expectEqual(@as(u64, 0), snapshot.processed_frame);
     try std.testing.expectEqual(@as(?u64, null), snapshot.total_frames);
     try std.testing.expectEqual(@as(f32, 0), snapshot.processing_speed);
+}
+
+test "frame progress preserves an unknown total" {
+    var state = app_state.AppState{};
+    state.updateFrameProgress(.analyzing, 0.04, 42, null, 18.5);
+
+    const snapshot = state.snapshot();
+    try std.testing.expectEqual(@as(u64, 42), snapshot.processed_frame);
+    try std.testing.expectEqual(@as(?u64, null), snapshot.total_frames);
+    try std.testing.expectEqual(@as(f32, 18.5), snapshot.processing_speed);
 }
 
 test "cancellation is accepted only for active processing" {

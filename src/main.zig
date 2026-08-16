@@ -1,5 +1,6 @@
 const std = @import("std");
 const rl = @import("raylib");
+const build_options = @import("build_options");
 const app_state = @import("app_state.zig");
 const media = @import("core/media.zig");
 const file_dialog = @import("platform/file_dialog.zig");
@@ -26,7 +27,13 @@ pub fn main() !void {
         .msaa_4x_hint = true,
         .vsync_hint = true,
     });
-    rl.initWindow(1280, 720, "Axia - Estabilização de Vídeo");
+    var title_buffer: [128]u8 = undefined;
+    const window_title = try std.fmt.bufPrintZ(
+        &title_buffer,
+        "Axia {s} - Estabilização de Vídeo",
+        .{build_options.version},
+    );
+    rl.initWindow(1280, 720, window_title);
     defer rl.closeWindow();
     rl.setWindowMinSize(960, 640);
     if (!rl.isWindowMaximized()) rl.maximizeWindow();

@@ -1,5 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
 
 const ffmpeg = if (build_options.native_ffmpeg) @cImport({
     @cInclude("libavcodec/avcodec.h");
@@ -9,6 +10,9 @@ const ffmpeg = if (build_options.native_ffmpeg) @cImport({
 }) else struct {};
 
 pub const native_enabled = build_options.native_ffmpeg;
+
+const transcode_poll_interval = 100 * std.time.ns_per_ms;
+const TranscodePipe = enum { stdout };
 
 pub const Progress = struct {
     processed_packets: u64,
@@ -49,6 +53,7 @@ pub const Options = struct {
     copy_metadata: bool = true,
     require_audio: bool = false,
     faststart: bool = true,
+    display_rotation_degrees: f64 = 0,
     observer: Observer = .{},
 };
 
@@ -75,6 +80,8 @@ pub const MuxError = error{
     PacketWriteFailed,
     TrailerWriteFailed,
     StreamIndexInvalid,
+    TranscoderNotFound,
+    AudioTranscodeFailed,
     Cancelled,
 } || std.mem.Allocator.Error;
 
@@ -140,6 +147,24 @@ const NativeMuxer = struct {
             0,
         );
         if (video_stream_index < 0) return error.VideoStreamNotFound;
+
+        const audio_plan = inspectAudio(source_input);
+        if (options.require_audio and audio_plan.stream_count == 0) {
+            return error.AudioRequired;
+        }
+        if (audio_plan.requires_transcode) {
+            try transcodeAudioToAac(
+                allocator,
+                video_path,
+                source_path,
+                output_path,
+                source_input,
+                audio_plan.stream_count,
+                total_duration_seconds,
+                options,
+            );
+            return .{ .audio_streams = audio_plan.stream_count };
+        }
 
         const output_path_z = try allocator.dupeZ(u8, output_path);
         defer allocator.free(output_path_z);
@@ -214,10 +239,6 @@ const NativeMuxer = struct {
             stream_mapping[input_index] = output_stream.*.index;
             audio_stream_count += 1;
         }
-        if (options.require_audio and audio_stream_count == 0) {
-            return error.AudioRequired;
-        }
-
         if (options.copy_metadata) {
             if (ffmpeg.av_dict_copy(
                 &output.metadata,
@@ -459,6 +480,228 @@ const NativeMuxer = struct {
     }
 };
 
+const AudioPlan = struct {
+    stream_count: u32 = 0,
+    requires_transcode: bool = false,
+};
+
+fn inspectAudio(context: *const ffmpeg.AVFormatContext) AudioPlan {
+    var result = AudioPlan{};
+    const stream_count: usize = @intCast(context.nb_streams);
+    for (0..stream_count) |index| {
+        const parameters = context.streams[index].*.codecpar;
+        if (parameters.*.codec_type != ffmpeg.AVMEDIA_TYPE_AUDIO) continue;
+        result.stream_count += 1;
+        if (audioCodecRequiresTranscode(parameters.*.codec_id)) {
+            result.requires_transcode = true;
+        }
+    }
+    return result;
+}
+
+fn audioCodecRequiresTranscode(codec_id: ffmpeg.AVCodecID) bool {
+    return codec_id != ffmpeg.AV_CODEC_ID_AAC;
+}
+
+fn transcodeAudioToAac(
+    allocator: std.mem.Allocator,
+    video_path: []const u8,
+    source_path: []const u8,
+    output_path: []const u8,
+    source_context: *const ffmpeg.AVFormatContext,
+    audio_stream_count: u32,
+    total_duration_seconds: ?f64,
+    options: Options,
+) MuxError!void {
+    var command = ffmpeg_command.resolve(allocator) catch return error.OutOfMemory;
+    defer command.deinit(allocator);
+    const rotation_text = try std.fmt.allocPrint(
+        allocator,
+        "{d:.6}",
+        .{options.display_rotation_degrees},
+    );
+    defer allocator.free(rotation_text);
+
+    var arguments = std.ArrayList([]const u8).init(allocator);
+    defer arguments.deinit();
+    var owned_arguments = std.ArrayList([]u8).init(allocator);
+    defer {
+        for (owned_arguments.items) |argument| allocator.free(argument);
+        owned_arguments.deinit();
+    }
+    try arguments.appendSlice(&.{
+        command.path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+    });
+    if (std.math.isFinite(options.display_rotation_degrees) and
+        @abs(options.display_rotation_degrees) >= 0.5)
+    {
+        try arguments.appendSlice(&.{
+            "-display_rotation",
+            rotation_text,
+        });
+    }
+    try arguments.appendSlice(&.{
+        "-i",
+        video_path,
+        "-i",
+        source_path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+    });
+    var output_audio_index: u32 = 0;
+    const source_stream_count: usize = @intCast(source_context.nb_streams);
+    for (0..source_stream_count) |input_index| {
+        const parameters = source_context.streams[input_index].*.codecpar;
+        if (parameters.*.codec_type != ffmpeg.AVMEDIA_TYPE_AUDIO) continue;
+        if (audioCodecRequiresTranscode(parameters.*.codec_id)) {
+            const codec_option = try std.fmt.allocPrint(
+                allocator,
+                "-c:a:{d}",
+                .{output_audio_index},
+            );
+            owned_arguments.append(codec_option) catch |err| {
+                allocator.free(codec_option);
+                return err;
+            };
+            const bitrate_option = try std.fmt.allocPrint(
+                allocator,
+                "-b:a:{d}",
+                .{output_audio_index},
+            );
+            owned_arguments.append(bitrate_option) catch |err| {
+                allocator.free(bitrate_option);
+                return err;
+            };
+            try arguments.appendSlice(&.{
+                codec_option,
+                "aac",
+                bitrate_option,
+                "192k",
+            });
+        }
+        output_audio_index += 1;
+    }
+    if (options.copy_metadata) {
+        try arguments.appendSlice(&.{
+            "-map_metadata",
+            "1",
+            "-map_metadata:s:v:0",
+            "1:s:v:0",
+        });
+    }
+    if (options.faststart) {
+        try arguments.appendSlice(&.{ "-movflags", "+faststart" });
+    }
+    try arguments.appendSlice(&.{
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-y",
+        output_path,
+    });
+
+    var child = std.process.Child.init(arguments.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+    child.expand_arg0 = .expand;
+    child.spawn() catch |err| switch (err) {
+        error.FileNotFound => return error.TranscoderNotFound,
+        else => return error.AudioTranscodeFailed,
+    };
+
+    var child_terminated = false;
+    defer if (!child_terminated) {
+        _ = child.kill() catch {};
+    };
+    const stdout = child.stdout orelse return error.AudioTranscodeFailed;
+    var poller = std.io.poll(
+        allocator,
+        TranscodePipe,
+        .{ .stdout = stdout },
+    );
+    defer poller.deinit();
+    var chunk: [2048]u8 = undefined;
+    var progress_line: [256]u8 = undefined;
+    var progress_line_len: usize = 0;
+    var progress_line_overflow = false;
+
+    options.observer.report(.{
+        .processed_packets = 0,
+        .processed_seconds = 0,
+        .total_seconds = total_duration_seconds,
+    });
+    while (true) {
+        if (options.observer.isCancelled()) {
+            _ = child.kill() catch return error.AudioTranscodeFailed;
+            child_terminated = true;
+            return error.Cancelled;
+        }
+        const pipe_open = poller.pollTimeout(transcode_poll_interval) catch
+            return error.AudioTranscodeFailed;
+        const fifo = poller.fifo(.stdout);
+        while (fifo.count > 0) {
+            const count = fifo.read(chunk[0..@min(chunk.len, fifo.count)]);
+            for (chunk[0..count]) |byte| {
+                if (byte == '\n') {
+                    if (!progress_line_overflow) {
+                        if (transcodeProgressSeconds(
+                            progress_line[0..progress_line_len],
+                        )) |seconds| {
+                            options.observer.report(.{
+                                .processed_packets = audio_stream_count,
+                                .processed_seconds = seconds,
+                                .total_seconds = total_duration_seconds,
+                            });
+                        }
+                    }
+                    progress_line_len = 0;
+                    progress_line_overflow = false;
+                } else if (!progress_line_overflow) {
+                    if (progress_line_len < progress_line.len) {
+                        progress_line[progress_line_len] = byte;
+                        progress_line_len += 1;
+                    } else {
+                        progress_line_overflow = true;
+                    }
+                }
+            }
+        }
+        if (!pipe_open and fifo.count == 0) break;
+    }
+
+    const term = child.wait() catch return error.AudioTranscodeFailed;
+    child_terminated = true;
+    const success = switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+    if (!success) return error.AudioTranscodeFailed;
+    options.observer.report(.{
+        .processed_packets = audio_stream_count,
+        .processed_seconds = total_duration_seconds orelse 0,
+        .total_seconds = total_duration_seconds,
+    });
+}
+
+fn transcodeProgressSeconds(line: []const u8) ?f64 {
+    const prefix = "out_time_us=";
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    const value = std.fmt.parseInt(u64, line[prefix.len..], 10) catch
+        return null;
+    return @as(f64, @floatFromInt(value)) / 1_000_000;
+}
+
 fn inputDurationSeconds(context: *const ffmpeg.AVFormatContext) ?f64 {
     if (context.duration <= 0 or context.duration == ffmpeg.AV_NOPTS_VALUE) {
         return null;
@@ -674,4 +917,29 @@ test "mux observer exposes cancellation state" {
     try std.testing.expect(!observer.isCancelled());
     cancelled = true;
     try std.testing.expect(observer.isCancelled());
+}
+
+test "FFmpeg audio progress reports microseconds as seconds" {
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 2.5),
+        transcodeProgressSeconds("out_time_us=2500000").?,
+        0.000001,
+    );
+    try std.testing.expectEqual(
+        @as(?f64, null),
+        transcodeProgressSeconds("progress=continue"),
+    );
+}
+
+test "AAC is copied while other audio codecs require conversion" {
+    if (!native_enabled) return error.SkipZigTest;
+    try std.testing.expect(!audioCodecRequiresTranscode(
+        ffmpeg.AV_CODEC_ID_AAC,
+    ));
+    try std.testing.expect(audioCodecRequiresTranscode(
+        ffmpeg.AV_CODEC_ID_OPUS,
+    ));
+    try std.testing.expect(audioCodecRequiresTranscode(
+        ffmpeg.AV_CODEC_ID_VORBIS,
+    ));
 }

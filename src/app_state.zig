@@ -211,14 +211,17 @@ pub const AppState = struct {
         phase: Phase,
         progress: f32,
         processed_frame: u64,
-        total_frames: u64,
+        total_frames: ?u64,
         processing_speed: f64,
     ) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.phase = phase;
         self.progress = std.math.clamp(progress, 0.0, 1.0);
-        self.processed_frame = @min(processed_frame, total_frames);
+        self.processed_frame = if (total_frames) |total|
+            @min(processed_frame, total)
+        else
+            processed_frame;
         self.total_frames = total_frames;
         self.processing_speed = @floatCast(@max(0.0, processing_speed));
         self.setMessageLocked("");

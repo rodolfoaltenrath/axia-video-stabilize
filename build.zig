@@ -4,6 +4,9 @@ const raylib_zig = @import("raylib_zig");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const app_version = packageVersion(b);
+    const semantic_version = std.SemanticVersion.parse(app_version) catch
+        @panic("build.zig.zon contains an invalid semantic version");
 
     // The native engine is the product engine and its dependencies are enabled
     // by default. Granular switches exist for focused adapter tests.
@@ -51,9 +54,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .version = semantic_version,
     });
 
     const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", app_version);
     build_options.addOption(bool, "native_ffmpeg", native_ffmpeg);
     build_options.addOption(bool, "native_opencv", native_opencv);
     build_options.addOption([]const u8, "test_video", test_video);
@@ -101,6 +106,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/cli.zig"),
         .target = target,
         .optimize = optimize,
+        .version = semantic_version,
     });
     cli.root_module.addOptions("build_options", build_options);
     cli.linkLibC();
@@ -122,11 +128,13 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
+    configureLinuxRuntime(b, run_cmd, target.result.os.tag, ffmpeg_lib, opencv_lib);
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run Zig Stabilizer");
     run_step.dependOn(&run_cmd.step);
 
     const cli_cmd = b.addRunArtifact(cli);
+    configureLinuxRuntime(b, cli_cmd, target.result.os.tag, ffmpeg_lib, opencv_lib);
     if (b.args) |args| cli_cmd.addArgs(args);
     const cli_step = b.step("cli", "Run the headless stabilization pipeline");
     cli_step.dependOn(&cli_cmd.step);
@@ -153,8 +161,27 @@ pub fn build(b: *std.Build) void {
         linux_opencv_bridge,
     );
     const run_tests = b.addRunArtifact(unit_tests);
+    configureLinuxRuntime(b, run_tests, target.result.os.tag, ffmpeg_lib, opencv_lib);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+}
+
+fn packageVersion(b: *std.Build) []const u8 {
+    const manifest = b.build_root.handle.readFileAlloc(
+        b.allocator,
+        "build.zig.zon",
+        64 * 1024,
+    ) catch @panic("could not read build.zig.zon");
+    const marker = ".version = \"";
+    const marker_index = std.mem.indexOf(u8, manifest, marker) orelse
+        @panic("build.zig.zon does not declare a version");
+    const version_start = marker_index + marker.len;
+    const version_end_relative = std.mem.indexOfScalar(
+        u8,
+        manifest[version_start..],
+        '\"',
+    ) orelse @panic("build.zig.zon contains an unterminated version");
+    return b.dupe(manifest[version_start .. version_start + version_end_relative]);
 }
 
 fn installedDependencyRoot(
@@ -251,6 +278,38 @@ fn linkNativeDependencies(
             },
         }
     }
+}
+
+fn configureLinuxRuntime(
+    b: *std.Build,
+    run: *std.Build.Step.Run,
+    target_os: std.Target.Os.Tag,
+    ffmpeg_lib: ?[]const u8,
+    opencv_lib: ?[]const u8,
+) void {
+    if (target_os != .linux) return;
+    const primary_path = opencv_lib orelse ffmpeg_lib orelse return;
+    const native_paths = if (ffmpeg_lib) |ffmpeg_path|
+        if (!std.mem.eql(u8, ffmpeg_path, primary_path))
+            b.fmt("{s}:{s}", .{ primary_path, ffmpeg_path })
+        else
+            primary_path
+    else
+        primary_path;
+    const inherited = b.graph.env_map.get("LD_LIBRARY_PATH");
+    run.setEnvironmentVariable(
+        "LD_LIBRARY_PATH",
+        if (inherited) |value|
+            b.fmt("{s}:{s}", .{ native_paths, value })
+        else
+            native_paths,
+    );
+
+    const flexiblas_path = b.pathJoin(&.{ primary_path, "flexiblas" });
+    const flexiblas_backend = b.pathJoin(&.{ flexiblas_path, "libflexiblas_netlib.so" });
+    std.fs.accessAbsolute(flexiblas_backend, .{}) catch return;
+    run.setEnvironmentVariable("FLEXIBLAS_LIBRARY_PATH", flexiblas_path);
+    run.setEnvironmentVariable("FLEXIBLAS", flexiblas_backend);
 }
 
 fn buildLinuxOpenCvBridge(

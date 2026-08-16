@@ -2,6 +2,7 @@ const std = @import("std");
 const rl = @import("raylib");
 const media = @import("../core/media.zig");
 const decoder_mod = @import("../engine/decoder.zig");
+const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
 
 const max_preview_width: u32 = 960;
 const max_preview_height: u32 = 540;
@@ -298,15 +299,8 @@ pub const Player = struct {
     }
 
     fn decode(self: *Player, start_seconds: f64) !void {
-        const executable_override = std.process.getEnvVarOwned(
-            self.allocator,
-            "AXIA_FFMPEG",
-        ) catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => null,
-            else => return err,
-        };
-        defer if (executable_override) |path| self.allocator.free(path);
-        const executable = executable_override orelse "ffmpeg";
+        var command = try ffmpeg_command.resolve(self.allocator);
+        defer command.deinit(self.allocator);
 
         const seek_text = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{start_seconds});
         defer self.allocator.free(seek_text);
@@ -319,7 +313,7 @@ pub const Player = struct {
         defer self.allocator.free(scale_filter);
 
         const argv = [_][]const u8{
-            executable,
+            command.path,
             "-hide_banner",
             "-loglevel",
             "error",

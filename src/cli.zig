@@ -1,5 +1,6 @@
 const std = @import("std");
 const app_state = @import("app_state.zig");
+const build_options = @import("build_options");
 const media = @import("core/media.zig");
 const engine = @import("engine/engine.zig");
 
@@ -7,14 +8,24 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    try engine.ensureReady();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
+        try std.io.getStdOut().writer().print("axia-cli {s}\n", .{build_options.version});
+        return;
+    }
+    if (args.len == 2 and
+        (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")))
+    {
+        printUsage();
+        return;
+    }
     if (args.len < 2) {
         printUsage();
         return error.InvalidArguments;
     }
+    try engine.ensureReady();
 
     const input_path = args[1];
     var output_path_optional: ?[]const u8 = null;
@@ -71,9 +82,11 @@ pub fn main() !void {
 
 fn printUsage() void {
     std.debug.print(
-        "uso: axia-cli <entrada> [saida.mp4] " ++
-            "[--diagnostics relatorio.csv]\n",
-        .{},
+        "Axia {s}\n" ++
+            "uso: axia-cli <entrada> [saida.mp4] " ++
+            "[--diagnostics relatorio.csv]\n" ++
+            "     axia-cli --version\n",
+        .{build_options.version},
     );
 }
 
