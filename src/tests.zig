@@ -30,6 +30,61 @@ test "derives stabilized output beside source" {
     try std.testing.expectEqualStrings("C:\\videos\\take-stabilized.mp4", output);
 }
 
+test "graphical output naming preserves previous exports" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(.{
+        .sub_path = "take-stabilized.mp4",
+        .data = "first",
+    });
+    try temporary.dir.writeFile(.{
+        .sub_path = "take-stabilized-2.mp4",
+        .data = "second",
+    });
+
+    const root = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ ".zig-cache", "tmp", temporary.sub_path[0..] },
+    );
+    defer std.testing.allocator.free(root);
+    const input = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ root, "take.mov" },
+    );
+    defer std.testing.allocator.free(input);
+    var output_buffer: [512]u8 = undefined;
+    const output = try media.deriveAvailableOutputPath(&output_buffer, input);
+    const expected = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ root, "take-stabilized-3.mp4" },
+    );
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, output);
+}
+
+test "graphical output naming uses the base name when available" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ ".zig-cache", "tmp", temporary.sub_path[0..] },
+    );
+    defer std.testing.allocator.free(root);
+    const input = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ root, "take.mp4" },
+    );
+    defer std.testing.allocator.free(input);
+    var output_buffer: [512]u8 = undefined;
+    const output = try media.deriveAvailableOutputPath(&output_buffer, input);
+    const expected = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ root, "take-stabilized.mp4" },
+    );
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, output);
+}
+
 test "rejects unsupported media extension" {
     var buffer: [256]u8 = undefined;
     try std.testing.expectError(

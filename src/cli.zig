@@ -55,7 +55,7 @@ pub fn main() !void {
 
     var output_buffer: [app_state.max_path_bytes]u8 = undefined;
     const output_path = output_path_optional orelse
-        try media.deriveOutputPath(&output_buffer, input_path);
+        try media.deriveAvailableOutputPath(&output_buffer, input_path);
 
     std.debug.print("Axia: iniciando pipeline nativo para {s}\n", .{input_path});
     var progress = CliProgress{};

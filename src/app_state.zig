@@ -184,6 +184,16 @@ pub const AppState = struct {
         self.setMessageLocked(message);
     }
 
+    pub fn setOutputPath(self: *AppState, output_path: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (output_path.len == 0 or output_path.len > max_path_bytes) return false;
+        self.media.output_path = [_:0]u8{0} ** max_path_bytes;
+        @memcpy(self.media.output_path[0..output_path.len], output_path);
+        self.media.output_len = output_path.len;
+        return true;
+    }
+
     pub fn begin(self: *AppState) ?JobConfig {
         self.mutex.lock();
         defer self.mutex.unlock();

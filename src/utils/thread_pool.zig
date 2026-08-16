@@ -1,5 +1,6 @@
 const std = @import("std");
 const state_mod = @import("../app_state.zig");
+const media = @import("../core/media.zig");
 const engine = @import("../engine/engine.zig");
 
 const Job = union(enum) {
@@ -101,10 +102,18 @@ pub const ThreadPool = struct {
         const crop_fraction =
             std.math.clamp(config.parameters.crop, 0.0, 30.0) / 100.0;
         const encoder_profile = config.parameters.export_quality.encoderProfile();
+        var output_buffer: [state_mod.max_path_bytes]u8 = undefined;
+        const output_path = try media.deriveAvailableOutputPath(
+            &output_buffer,
+            config.media.input(),
+        );
+        if (!self.state.setOutputPath(output_path)) {
+            return error.OutputPathTooLong;
+        }
         _ = try engine.exporter.Exporter.run(
             self.allocator,
             config.media.input(),
-            config.media.output(),
+            output_path,
             .{
                 .session = .{
                     .smoothing_radius_seconds = normalized_smoothness * normalized_smoothness * 2.0,
@@ -140,6 +149,8 @@ fn messageForError(err: anyerror) []const u8 {
         error.HeaderWriteFailed => "O contêiner MP4 rejeitou um dos streams de vídeo ou áudio.",
         error.TranscoderNotFound => "Instale o FFmpeg para converter o áudio deste vídeo.",
         error.AudioTranscodeFailed => "Não foi possível converter o áudio para AAC.",
+        error.NoAvailableOutputName => "Há muitas exportações deste vídeo na pasta de destino.",
+        error.OutputPathTooLong => "O caminho do arquivo de saída é longo demais.",
         error.PacketWriteFailed, error.TrailerWriteFailed, error.PublishFailed => "Não foi possível finalizar o MP4 estabilizado.",
         else => "Falha inesperada no pipeline de estabilização.",
     };

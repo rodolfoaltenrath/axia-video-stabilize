@@ -4,6 +4,7 @@ pub const MediaError = error{
     EmptyPath,
     UnsupportedFormat,
     OutputPathTooLong,
+    NoAvailableOutputName,
 };
 
 pub const PreviewSize = struct {
@@ -39,6 +40,42 @@ pub fn deriveOutputPath(buffer: []u8, input_path: []const u8) MediaError![]const
     const extension = std.fs.path.extension(input_path);
     const stem_path = input_path[0 .. input_path.len - extension.len];
     return std.fmt.bufPrint(buffer, "{s}-stabilized.mp4", .{stem_path}) catch error.OutputPathTooLong;
+}
+
+/// Chooses a free name for graphical exports so running the same stabilization
+/// again never silently replaces a previous result.
+pub fn deriveAvailableOutputPath(
+    buffer: []u8,
+    input_path: []const u8,
+) MediaError![]const u8 {
+    if (input_path.len == 0) return error.EmptyPath;
+    if (!isSupported(input_path)) return error.UnsupportedFormat;
+
+    const extension = std.fs.path.extension(input_path);
+    const stem_path = input_path[0 .. input_path.len - extension.len];
+    var ordinal: u32 = 1;
+    while (ordinal <= 9999) : (ordinal += 1) {
+        const candidate = if (ordinal == 1)
+            std.fmt.bufPrint(buffer, "{s}-stabilized.mp4", .{stem_path})
+        else
+            std.fmt.bufPrint(
+                buffer,
+                "{s}-stabilized-{d}.mp4",
+                .{ stem_path, ordinal },
+            );
+        const output_path = candidate catch return error.OutputPathTooLong;
+        if (!pathExists(output_path)) return output_path;
+    }
+    return error.NoAvailableOutputName;
+}
+
+fn pathExists(path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) {
+        std.fs.accessAbsolute(path, .{}) catch return false;
+    } else {
+        std.fs.cwd().access(path, .{}) catch return false;
+    }
+    return true;
 }
 
 pub fn fitPreviewSize(

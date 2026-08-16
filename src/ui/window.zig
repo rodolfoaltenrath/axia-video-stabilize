@@ -236,12 +236,12 @@ fn drawEmptyPreview(viewport: rl.Rectangle) bool {
     );
 
     const title = if (hovered)
-        "Clique para importar um vídeo"
+        "Clique para escolher um vídeo"
     else
-        "Importe um vídeo para visualizar";
+        "Clique ou arraste um vídeo aqui";
     const title_size = fonts.measure(title, 14, .semibold);
     components.textStrong(title, center_x - title_size.x * 0.5, center_y + 14, 14, theme.text);
-    const detail = "MP4, MOV, MKV, AVI, WebM ou MTS";
+    const detail = "MP4, MOV, MKV, AVI, WebM, M4V, MTS ou M2TS";
     const detail_size = fonts.measure(detail, 11, .regular);
     components.text(detail, center_x - detail_size.x * 0.5, center_y + 38, 11, theme.text_muted);
     return hovered and rl.isMouseButtonPressed(.left);

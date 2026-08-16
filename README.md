@@ -80,7 +80,17 @@ audio conversion automatically prefer the bundled `ffmpeg.exe`; setting
 
 After starting the application, select **Importar vídeo** and choose a supported
 file. Axia will analyze the clip frame by frame, report live frame progress and
-export `<input-name>-stabilized.mp4` beside the original.
+export `<input-name>-stabilized.mp4` beside the original. If that name already
+exists, the graphical application and CLI with automatic output naming select
+`-stabilized-2`, `-3` and so on, preserving every previous export. An explicit
+CLI output path remains under the caller's control.
+
+You can also drag one video directly onto the application window or open it as
+the graphical executable's only argument. During development:
+
+```text
+zig build run -- /path/to/input.mp4
+```
 
 The workspace includes a real video preview with compact play/pause, ±5-second
 skip controls, space-bar control and a seek bar below the image. FFmpeg streams

@@ -45,8 +45,10 @@ pub fn main() !void {
     defer preview.deinit();
     var import_selector = file_dialog.AsyncSelector.init(allocator);
     defer import_selector.deinit();
+    try importInitialArgument(allocator, &state, &preview);
 
     while (!rl.windowShouldClose()) {
+        if (rl.isFileDropped()) handleDroppedFiles(&state, &preview);
         if (import_selector.poll()) |selection| {
             finishImport(allocator, &state, &preview, selection);
         }
@@ -101,8 +103,49 @@ fn finishImport(
     };
     defer allocator.free(selected_path);
 
-    if (!loadMedia(state, selected_path)) return;
-    preview.load(selected_path) catch |err| reportPreviewError(state, err);
+    importMedia(state, preview, selected_path);
+}
+
+fn importInitialArgument(
+    allocator: std.mem.Allocator,
+    state: *app_state.AppState,
+    preview: *preview_player.Player,
+) !void {
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    if (args.len <= 1) return;
+    if (args.len != 2 or std.mem.startsWith(u8, args[1], "--")) {
+        state.setMessage("Para abrir pela linha de comando, informe apenas o caminho de um vídeo.");
+        return;
+    }
+    importMedia(state, preview, args[1]);
+}
+
+fn handleDroppedFiles(
+    state: *app_state.AppState,
+    preview: *preview_player.Player,
+) void {
+    const dropped = rl.loadDroppedFiles();
+    defer rl.unloadDroppedFiles(dropped);
+    if (state.snapshot().phase.isBusy()) {
+        state.setMessage("Cancele o processamento atual antes de importar outro vídeo.");
+        return;
+    }
+    if (dropped.count != 1 or dropped.paths == null or dropped.paths[0] == null) {
+        state.setMessage("Arraste apenas um arquivo de vídeo por vez.");
+        return;
+    }
+    const path_z: [*:0]const u8 = @ptrCast(dropped.paths[0]);
+    importMedia(state, preview, std.mem.span(path_z));
+}
+
+fn importMedia(
+    state: *app_state.AppState,
+    preview: *preview_player.Player,
+    input_path: []const u8,
+) void {
+    if (!loadMedia(state, input_path)) return;
+    preview.load(input_path) catch |err| reportPreviewError(state, err);
 }
 
 fn reportFileDialogError(
@@ -125,9 +168,21 @@ fn loadMedia(state: *app_state.AppState, input_path: []const u8) bool {
             error.UnsupportedFormat => "Formato não suportado. Use MP4, MOV, MKV, AVI, WebM, M4V, MTS ou M2TS.",
             error.OutputPathTooLong => "O caminho do vídeo é longo demais.",
             error.EmptyPath => "O arquivo selecionado não possui um caminho válido.",
+            error.NoAvailableOutputName => "Não foi possível reservar um nome para a exportação.",
         });
         return false;
     };
+    const input_exists = if (std.fs.path.isAbsolute(input_path)) blk: {
+        std.fs.accessAbsolute(input_path, .{}) catch break :blk false;
+        break :blk true;
+    } else blk: {
+        std.fs.cwd().access(input_path, .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (!input_exists) {
+        state.setMessage("O arquivo de vídeo informado não existe ou não está acessível.");
+        return false;
+    }
     if (!state.setMedia(input_path, output_path)) {
         state.setMessage("Não foi possível carregar o vídeo durante um processamento ativo.");
         return false;
