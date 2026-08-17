@@ -122,11 +122,11 @@ const NativeSession = struct {
             options.analyzer,
         );
         defer analyzer.deinit();
-        const video_info = analyzer.videoInfo();
+        const initial_video_info = analyzer.videoInfo();
 
         var records = std.ArrayList(types.AnalysisRecord).init(allocator);
         defer records.deinit();
-        if (video_info.estimated_frame_count) |estimated| {
+        if (initial_video_info.estimated_frame_count) |estimated| {
             if (estimated > std.math.maxInt(usize)) {
                 return error.FrameCountOverflow;
             }
@@ -139,10 +139,13 @@ const NativeSession = struct {
             options.observer.report(.{
                 .stage = .analyzing,
                 .decoded_frames = @intCast(records.items.len),
-                .estimated_frames = video_info.estimated_frame_count,
+                .estimated_frames = initial_video_info.estimated_frame_count,
             });
         }
         if (options.observer.isCancelled()) return error.Cancelled;
+        // Decoding may discover per-frame color metadata that was absent from
+        // the container. Read it back after the complete analysis pass.
+        const video_info = analyzer.videoInfo();
 
         options.observer.report(.{
             .stage = .smoothing,

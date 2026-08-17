@@ -21,10 +21,19 @@ pub fn build(b: *std.Build) void {
     const opencv_lib_option = b.option([]const u8, "opencv-lib", "Directory containing OpenCV libraries");
     const installed_ffmpeg = installedDependencyRoot(b, target.result.os.tag, "ffmpeg-8.1-shared");
     const installed_opencv = installedDependencyRoot(b, target.result.os.tag, "opencv-4.13.0-zig");
-    const ffmpeg_include = ffmpeg_include_option orelse native_include orelse dependencySubdirectory(b, installed_ffmpeg, "include");
-    const ffmpeg_lib = ffmpeg_lib_option orelse native_lib orelse dependencySubdirectory(b, installed_ffmpeg, "lib");
-    const opencv_include = opencv_include_option orelse native_include orelse dependencySubdirectory(b, installed_opencv, "include");
-    const opencv_lib = opencv_lib_option orelse native_lib orelse dependencySubdirectory(b, installed_opencv, "x64/mingw/lib");
+    const linux_dependencies = installedLinuxDependencyRoot(b, target.result.os.tag);
+    const ffmpeg_include = ffmpeg_include_option orelse native_include orelse
+        dependencySubdirectory(b, linux_dependencies, "include/ffmpeg") orelse
+        dependencySubdirectory(b, installed_ffmpeg, "include");
+    const ffmpeg_lib = ffmpeg_lib_option orelse native_lib orelse
+        dependencySubdirectory(b, linux_dependencies, "lib64") orelse
+        dependencySubdirectory(b, installed_ffmpeg, "lib");
+    const opencv_include = opencv_include_option orelse native_include orelse
+        dependencySubdirectory(b, linux_dependencies, "include/opencv4") orelse
+        dependencySubdirectory(b, installed_opencv, "include");
+    const opencv_lib = opencv_lib_option orelse native_lib orelse
+        dependencySubdirectory(b, linux_dependencies, "lib64") orelse
+        dependencySubdirectory(b, installed_opencv, "x64/mingw/lib");
     const test_video = b.option([]const u8, "test-video", "Video fixture for native decoder tests") orelse "";
     const test_video_frames = b.option(u64, "test-video-frames", "Expected decoded fixture frame count") orelse 0;
     const test_video_audio_streams = b.option(u32, "test-video-audio-streams", "Expected audio streams in the native fixture") orelse 0;
@@ -195,6 +204,51 @@ fn installedDependencyRoot(
     const root = b.pathJoin(&.{ local_app_data, "Programs", "AxiaDeps", directory });
     std.fs.accessAbsolute(root, .{}) catch return null;
     return root;
+}
+
+fn installedLinuxDependencyRoot(
+    b: *std.Build,
+    target_os: std.Target.Os.Tag,
+) ?[]const u8 {
+    if (target_os != .linux) return null;
+
+    if (std.process.getEnvVarOwned(b.allocator, "AXIA_DEPS_ROOT")) |root| {
+        if (isLinuxDependencyRoot(b, root)) return root;
+    } else |_| {}
+
+    if (isLinuxDependencyRoot(b, "/usr")) return "/usr";
+
+    const data_home = std.process.getEnvVarOwned(b.allocator, "XDG_DATA_HOME") catch blk: {
+        const user_home = std.process.getEnvVarOwned(b.allocator, "HOME") catch return null;
+        break :blk b.pathJoin(&.{ user_home, ".local", "share" });
+    };
+    const dependencies_dir = b.pathJoin(&.{ data_home, "axia-deps" });
+    var directory = std.fs.openDirAbsolute(dependencies_dir, .{ .iterate = true }) catch return null;
+    defer directory.close();
+
+    var best_root: ?[]const u8 = null;
+    var iterator = directory.iterate();
+    while (iterator.next() catch return best_root) |entry| {
+        if (entry.kind != .directory) continue;
+        const candidate = b.pathJoin(&.{ dependencies_dir, entry.name, "root", "usr" });
+        if (!isLinuxDependencyRoot(b, candidate)) continue;
+        if (best_root == null or std.mem.order(u8, candidate, best_root.?) == .gt) {
+            best_root = candidate;
+        }
+    }
+    return best_root;
+}
+
+fn isLinuxDependencyRoot(b: *std.Build, root: []const u8) bool {
+    for ([_][]const u8{
+        "include/ffmpeg/libavcodec/avcodec.h",
+        "include/opencv4/opencv2/core.hpp",
+        "lib64",
+    }) |required_path| {
+        const path = b.pathJoin(&.{ root, required_path });
+        std.fs.accessAbsolute(path, .{}) catch return false;
+    }
+    return true;
 }
 
 fn dependencySubdirectory(

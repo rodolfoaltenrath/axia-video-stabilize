@@ -13,6 +13,10 @@ per-scene static or dynamic crop plan, decodes full-resolution BGRA frames,
 warps them through reusable buffers, encodes H.264 and remuxes the source audio
 and metadata into a transactionally published MP4.
 
+PQ/HDR10 and HLG inputs are converted from BT.2020 to SDR BT.709 through a
+16-bit, highlight-preserving tone-mapping path before stabilization and H.264
+encoding. SDR inputs retain their original color metadata.
+
 ## Requirements
 
 - Zig 0.13.0
@@ -20,6 +24,8 @@ and metadata into a transactionally published MP4.
 - OpenCV development libraries used by the small bridge in `native/`
 - The `ffmpeg` executable on `PATH` for the graphical video preview,
   non-AAC audio conversion and test fixture generation
+- On Fedora, `libavcodec-freeworld` from RPM Fusion is required for codecs
+  omitted by `ffmpeg-free`, including HEVC/H.265
 - On Linux, `zenity` (GNOME and most Fedora installations) or `kdialog` (KDE)
   for the graphical video file selector
 - Windows 10/11 or Linux with the usual X11/OpenGL development packages
@@ -113,6 +119,11 @@ locations:
 ```text
 zig build run
 ```
+
+On Fedora, the build also discovers dependency bundles stored under
+`~/.local/share/axia-deps`, including the bundle used by the release packaging
+script. Set `AXIA_DEPS_ROOT` to the bundle's `usr` directory to select a
+different location explicitly.
 
 On Windows, custom library locations can be supplied explicitly:
 

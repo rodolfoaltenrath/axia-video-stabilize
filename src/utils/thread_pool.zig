@@ -145,6 +145,7 @@ fn messageForError(err: anyerror) []const u8 {
         error.DistortionModeNotImplemented => "O modo de distorção ainda não está disponível.",
         error.NativeDependenciesDisabled => "A engine exige FFmpeg e OpenCV no build.",
         error.OpenInputFailed, error.StreamInfoFailed, error.VideoStreamNotFound => "Não foi possível abrir o vídeo selecionado.",
+        error.DecoderNotFound => "O FFmpeg não possui o decoder deste vídeo. No Fedora, instale libavcodec-freeworld.",
         error.EncoderNotFound => "Nenhum encoder H.264 compatível foi encontrado no FFmpeg.",
         error.HeaderWriteFailed => "O contêiner MP4 rejeitou um dos streams de vídeo ou áudio.",
         error.TranscoderNotFound => "Instale o FFmpeg para converter o áudio deste vídeo.",

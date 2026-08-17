@@ -316,7 +316,10 @@ pub const Player = struct {
             command.path,
             "-hide_banner",
             "-loglevel",
-            "error",
+            // Normal cancellation closes the raw-video pipe before FFmpeg's
+            // muxer finishes. Only fatal diagnostics belong in the terminal;
+            // ordinary broken-pipe messages are expected during shutdown.
+            "fatal",
             "-nostdin",
             "-threads",
             "2",

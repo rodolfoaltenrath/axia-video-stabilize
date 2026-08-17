@@ -27,7 +27,6 @@ pub const DecoderError = error{
     DecodeFailed,
     MissingTimestamp,
     UnsupportedResolutionChange,
-    UnsupportedHdrTransfer,
     ConversionFailed,
 } || std.mem.Allocator.Error;
 
@@ -212,12 +211,17 @@ const NativeDecoder = struct {
     packet: *ffmpeg.AVPacket,
     sws_context: ?*ffmpeg.SwsContext = null,
     video_stream_index: c_int,
+    source_color: ColorInfo,
     info: VideoInfo,
     output_dimensions: Dimensions,
     output_format: PixelFormat,
     output_pixels: []u8,
     output_frame_size: usize,
     output_stride: usize,
+    hdr_pixels: ?[]u16 = null,
+    hdr_linear_lut: ?[]f32 = null,
+    sdr_transfer_lut: ?[]u8 = null,
+    hdr_lut_transfer: i32 = color_transfer_unspecified,
     next_index: u64 = 0,
     draining: bool = false,
     finished: bool = false,
@@ -260,6 +264,9 @@ const NativeDecoder = struct {
             &codec,
             0,
         );
+        if (stream_index == averror_decoder_not_found) {
+            return error.DecoderNotFound;
+        }
         if (stream_index < 0) return error.VideoStreamNotFound;
         const selected_codec = codec orelse return error.DecoderNotFound;
 
@@ -369,6 +376,15 @@ const NativeDecoder = struct {
             frame_rate,
             duration_seconds,
         );
+        const source_color = ColorInfo{
+            .range = @intCast(codec_context.color_range),
+            .primaries = @intCast(codec_context.color_primaries),
+            .transfer = @intCast(codec_context.color_trc),
+            .matrix = @intCast(codec_context.colorspace),
+            .chroma_location = @intCast(
+                codec_context.chroma_sample_location,
+            ),
+        };
 
         return .{
             .allocator = allocator,
@@ -377,19 +393,12 @@ const NativeDecoder = struct {
             .frame = frame,
             .packet = packet,
             .video_stream_index = stream_index,
+            .source_color = source_color,
             .info = .{
                 .source = source,
                 .analysis = analysis,
                 .display_rotation_degrees = display_rotation_degrees,
-                .color = .{
-                    .range = @intCast(codec_context.color_range),
-                    .primaries = @intCast(codec_context.color_primaries),
-                    .transfer = @intCast(codec_context.color_trc),
-                    .matrix = @intCast(codec_context.colorspace),
-                    .chroma_location = @intCast(
-                        codec_context.chroma_sample_location,
-                    ),
-                },
+                .color = outputColorInfo(source_color),
                 .time_base = time_base,
                 .frame_rate = frame_rate,
                 .duration_seconds = duration_seconds,
@@ -405,6 +414,9 @@ const NativeDecoder = struct {
 
     pub fn deinit(self: *NativeDecoder) void {
         if (self.sws_context) |context| ffmpeg.sws_freeContext(context);
+        if (self.sdr_transfer_lut) |lut| self.allocator.free(lut);
+        if (self.hdr_linear_lut) |lut| self.allocator.free(lut);
+        if (self.hdr_pixels) |pixels| self.allocator.free(pixels);
 
         var packet: ?*ffmpeg.AVPacket = self.packet;
         ffmpeg.av_packet_free(&packet);
@@ -480,8 +492,25 @@ const NativeDecoder = struct {
         }
 
         const source_format: ffmpeg.AVPixelFormat = self.frame.format;
-        const output_pixel_format: ffmpeg.AVPixelFormat =
-            switch (self.output_format) {
+        const frame_color = ColorInfo{
+            .range = @intCast(self.frame.color_range),
+            .primaries = @intCast(self.frame.color_primaries),
+            .transfer = @intCast(self.frame.color_trc),
+            .matrix = @intCast(self.frame.colorspace),
+            .chroma_location = @intCast(self.frame.chroma_location),
+        };
+        const source_color = resolvedColorInfo(frame_color, self.source_color);
+        const hdr_transfer = hdrTransfer(source_color.transfer);
+        if (hdr_transfer != null) {
+            try self.ensureHdrResources(source_color.transfer);
+            // Some containers only expose HDR metadata on decoded frames.
+            // Keep the public video information synchronized so the encoder
+            // advertises the SDR result instead of stale source metadata.
+            self.info.color = outputColorInfo(source_color);
+        }
+        const output_pixel_format: ffmpeg.AVPixelFormat = if (hdr_transfer != null)
+            ffmpeg.AV_PIX_FMT_BGRA64LE
+        else switch (self.output_format) {
             .gray8 => ffmpeg.AV_PIX_FMT_GRAY8,
             .bgra8_analysis, .bgra8 => ffmpeg.AV_PIX_FMT_BGRA,
         };
@@ -502,35 +531,26 @@ const NativeDecoder = struct {
             return error.ConversionFailed;
         };
         self.sws_context = cached_context;
-        const frame_color = ColorInfo{
-            .range = @intCast(self.frame.color_range),
-            .primaries = @intCast(self.frame.color_primaries),
-            .transfer = @intCast(self.frame.color_trc),
-            .matrix = @intCast(self.frame.colorspace),
-            .chroma_location = @intCast(self.frame.chroma_location),
-        };
-        if (isHdrTransfer(frame_color.transfer) or
-            isHdrTransfer(self.info.color.transfer))
-        {
-            std.log.err(
-                "FFmpeg: vídeo HDR requer tone mapping antes do encode H.264 SDR",
-                .{},
-            );
-            return error.UnsupportedHdrTransfer;
-        }
         try configureColorConversion(
             cached_context,
             source_format,
-            frame_color,
-            self.info.color,
+            source_color,
             self.info.source,
         );
 
+        const destination_pixels: [*c]u8 = if (hdr_transfer != null)
+            @ptrCast(self.hdr_pixels.?.ptr)
+        else
+            self.output_pixels.ptr;
+        const destination_row_bytes: usize = if (hdr_transfer != null)
+            @as(usize, self.output_dimensions.width) * 4 * @sizeOf(u16)
+        else
+            self.output_stride;
         var destination_data = [_][*c]u8{
-            self.output_pixels.ptr, null, null, null, null, null, null, null,
+            destination_pixels, null, null, null, null, null, null, null,
         };
         var destination_stride = [_]c_int{
-            @intCast(self.output_stride), 0, 0, 0, 0, 0, 0, 0,
+            @intCast(destination_row_bytes), 0, 0, 0, 0, 0, 0, 0,
         };
         var source_data: [8][*c]const u8 = .{
             null, null, null, null, null, null, null, null,
@@ -552,6 +572,7 @@ const NativeDecoder = struct {
         if (converted_rows != self.output_dimensions.height) {
             return error.ConversionFailed;
         }
+        if (hdr_transfer != null) self.toneMapHdr(source_color);
 
         const duration: ?i64 = if (self.frame.duration > 0)
             self.frame.duration
@@ -574,6 +595,98 @@ const NativeDecoder = struct {
             .stride = self.output_stride,
             .format = self.output_format,
         };
+    }
+
+    fn ensureHdrResources(
+        self: *NativeDecoder,
+        transfer: i32,
+    ) std.mem.Allocator.Error!void {
+        if (self.hdr_pixels == null) {
+            const pixel_count = @as(usize, self.output_dimensions.width) *
+                @as(usize, self.output_dimensions.height) * 4;
+            const padding = @as(usize, ffmpeg.AV_INPUT_BUFFER_PADDING_SIZE) /
+                @sizeOf(u16);
+            self.hdr_pixels = try self.allocator.alloc(u16, pixel_count + padding);
+        }
+        if (self.hdr_linear_lut == null) {
+            self.hdr_linear_lut = try self.allocator.alloc(f32, hdr_lut_size);
+        }
+        if (self.sdr_transfer_lut == null) {
+            const lut = try self.allocator.alloc(u8, hdr_lut_size);
+            for (lut, 0..) |*value, index| {
+                const linear = @as(f64, @floatFromInt(index)) /
+                    @as(f64, hdr_lut_size - 1);
+                value.* = floatToByte(bt709Oetf(linear));
+            }
+            self.sdr_transfer_lut = lut;
+        }
+        if (self.hdr_lut_transfer != transfer) {
+            const transfer_kind = hdrTransfer(transfer).?;
+            for (self.hdr_linear_lut.?, 0..) |*value, index| {
+                const encoded = @as(f64, @floatFromInt(index)) /
+                    @as(f64, hdr_lut_size - 1);
+                value.* = @floatCast(hdrToLinear(encoded, transfer_kind));
+            }
+            self.hdr_lut_transfer = transfer;
+        }
+    }
+
+    fn toneMapHdr(self: *NativeDecoder, color: ColorInfo) void {
+        const source = self.hdr_pixels.?;
+        const linear_lut = self.hdr_linear_lut.?;
+        const transfer_lut = self.sdr_transfer_lut.?;
+        const width: usize = @intCast(self.output_dimensions.width);
+        const height: usize = @intCast(self.output_dimensions.height);
+
+        for (0..height) |row| {
+            for (0..width) |column| {
+                const pixel_index = (row * width + column) * 4;
+                var blue = linear_lut[source[pixel_index]];
+                var green = linear_lut[source[pixel_index + 1]];
+                var red = linear_lut[source[pixel_index + 2]];
+                if (color.primaries == color_primaries_bt2020) {
+                    const converted_red = 1.660491 * red -
+                        0.587641 * green - 0.072850 * blue;
+                    const converted_green = -0.124550 * red +
+                        1.132900 * green - 0.008349 * blue;
+                    const converted_blue = -0.018151 * red -
+                        0.100579 * green + 1.118730 * blue;
+                    red = converted_red;
+                    green = converted_green;
+                    blue = converted_blue;
+                }
+                red = @max(red, 0);
+                green = @max(green, 0);
+                blue = @max(blue, 0);
+                const luminance = 0.2126 * red + 0.7152 * green +
+                    0.0722 * blue;
+                const mapped_luminance = acesToneMap(luminance);
+                const scale = if (luminance > 0.000001)
+                    mapped_luminance / luminance
+                else
+                    0;
+                red = std.math.clamp(red * scale, 0, 1);
+                green = std.math.clamp(green * scale, 0, 1);
+                blue = std.math.clamp(blue * scale, 0, 1);
+
+                switch (self.output_format) {
+                    .gray8 => {
+                        self.output_pixels[row * self.output_stride + column] =
+                            transfer_lut[linearLutIndex(mapped_luminance)];
+                    },
+                    .bgra8_analysis, .bgra8 => {
+                        const output_index = row * self.output_stride + column * 4;
+                        self.output_pixels[output_index] =
+                            transfer_lut[linearLutIndex(blue)];
+                        self.output_pixels[output_index + 1] =
+                            transfer_lut[linearLutIndex(green)];
+                        self.output_pixels[output_index + 2] =
+                            transfer_lut[linearLutIndex(red)];
+                        self.output_pixels[output_index + 3] = 255;
+                    },
+                }
+            }
+        }
     }
 };
 
@@ -618,29 +731,9 @@ fn displayRotationFromSideData(data: [*c]const u8, size: usize) f64 {
 fn configureColorConversion(
     context: *ffmpeg.SwsContext,
     source_format: ffmpeg.AVPixelFormat,
-    frame_color: ColorInfo,
-    stream_color: ColorInfo,
+    color: ColorInfo,
     dimensions: Dimensions,
 ) DecoderError!void {
-    const color = ColorInfo{
-        .range = preferSpecified(frame_color.range, stream_color.range, 0),
-        .primaries = preferSpecified(
-            frame_color.primaries,
-            stream_color.primaries,
-            2,
-        ),
-        .transfer = preferSpecified(
-            frame_color.transfer,
-            stream_color.transfer,
-            2,
-        ),
-        .matrix = preferSpecified(frame_color.matrix, stream_color.matrix, 2),
-        .chroma_location = preferSpecified(
-            frame_color.chroma_location,
-            stream_color.chroma_location,
-            0,
-        ),
-    };
     const coefficients = ffmpeg.sws_getCoefficients(
         swsMatrix(color.matrix, dimensions),
     );
@@ -662,9 +755,107 @@ fn configureColorConversion(
     if (result < 0) return error.ConversionFailed;
 }
 
-fn isHdrTransfer(transfer: i32) bool {
-    return transfer == ffmpeg.AVCOL_TRC_SMPTE2084 or
-        transfer == ffmpeg.AVCOL_TRC_ARIB_STD_B67;
+const color_range_mpeg = 1;
+// AVERROR_DECODER_NOT_FOUND is a negative FFmpeg tag whose unsigned C macro
+// cannot be translated by Zig 0.13's C importer.
+const averror_decoder_not_found: c_int = -1128613112;
+const color_primaries_bt709 = 1;
+const color_primaries_bt2020 = 9;
+const color_transfer_bt709 = 1;
+const color_transfer_unspecified = 2;
+const color_transfer_pq = 16;
+const color_transfer_hlg = 18;
+const color_matrix_bt709 = 1;
+const chroma_location_left = 1;
+const hdr_lut_size = std.math.maxInt(u16) + 1;
+
+const HdrTransfer = enum { pq, hlg };
+
+fn hdrTransfer(transfer: i32) ?HdrTransfer {
+    return switch (transfer) {
+        color_transfer_pq => .pq,
+        color_transfer_hlg => .hlg,
+        else => null,
+    };
+}
+
+fn outputColorInfo(source: ColorInfo) ColorInfo {
+    if (hdrTransfer(source.transfer) == null) return source;
+    return .{
+        .range = color_range_mpeg,
+        .primaries = color_primaries_bt709,
+        .transfer = color_transfer_bt709,
+        .matrix = color_matrix_bt709,
+        .chroma_location = chroma_location_left,
+    };
+}
+
+fn resolvedColorInfo(frame: ColorInfo, stream: ColorInfo) ColorInfo {
+    return .{
+        .range = preferSpecified(frame.range, stream.range, 0),
+        .primaries = preferSpecified(frame.primaries, stream.primaries, 2),
+        .transfer = preferSpecified(frame.transfer, stream.transfer, 2),
+        .matrix = preferSpecified(frame.matrix, stream.matrix, 2),
+        .chroma_location = preferSpecified(
+            frame.chroma_location,
+            stream.chroma_location,
+            0,
+        ),
+    };
+}
+
+fn hdrToLinear(encoded: f64, transfer: HdrTransfer) f64 {
+    return switch (transfer) {
+        .pq => blk: {
+            const m1 = 2610.0 / 16384.0;
+            const m2 = 2523.0 / 32.0;
+            const c1 = 3424.0 / 4096.0;
+            const c2 = 2413.0 / 128.0;
+            const c3 = 2392.0 / 128.0;
+            const power = std.math.pow(f64, encoded, 1.0 / m2);
+            const numerator = @max(power - c1, 0);
+            const denominator = @max(c2 - c3 * power, 0.000001);
+            // PQ is absolute up to 10,000 nits. Express it relative to the
+            // 100-nit SDR display targeted by the output transfer function.
+            break :blk std.math.pow(f64, numerator / denominator, 1.0 / m1) * 100.0;
+        },
+        .hlg => blk: {
+            const a = 0.17883277;
+            const b = 0.28466892;
+            const c = 0.55991073;
+            const scene_linear = if (encoded <= 0.5)
+                encoded * encoded / 3.0
+            else
+                (@exp((encoded - c) / a) + b) / 12.0;
+            // Maps HLG's nominal 75% reference white close to SDR diffuse
+            // white before highlight compression.
+            break :blk scene_linear * 3.75;
+        },
+    };
+}
+
+fn acesToneMap(linear: f32) f32 {
+    if (linear <= 0) return 0;
+    const numerator = linear * (2.51 * linear + 0.03);
+    const denominator = linear * (2.43 * linear + 0.59) + 0.14;
+    return std.math.clamp(numerator / denominator, 0, 1);
+}
+
+fn bt709Oetf(linear: f64) f64 {
+    const value = std.math.clamp(linear, 0, 1);
+    return if (value < 0.018)
+        4.5 * value
+    else
+        1.099 * std.math.pow(f64, value, 0.45) - 0.099;
+}
+
+fn floatToByte(value: f64) u8 {
+    return @intFromFloat(@round(std.math.clamp(value, 0, 1) * 255.0));
+}
+
+fn linearLutIndex(value: f32) u16 {
+    return @intFromFloat(@round(std.math.clamp(value, 0, 1) *
+        @as(f32, @floatFromInt(hdr_lut_size - 1))));
 }
 
 fn preferSpecified(frame: i32, stream: i32, unspecified: i32) i32 {
@@ -730,11 +921,36 @@ test "frame count falls back to duration and frame rate" {
     );
 }
 
-test "HDR transfer functions require explicit tone mapping" {
-    if (!native_enabled) return error.SkipZigTest;
-    try std.testing.expect(isHdrTransfer(ffmpeg.AVCOL_TRC_SMPTE2084));
-    try std.testing.expect(isHdrTransfer(ffmpeg.AVCOL_TRC_ARIB_STD_B67));
-    try std.testing.expect(!isHdrTransfer(ffmpeg.AVCOL_TRC_BT709));
+test "HDR transfer functions select tone mapping and SDR metadata" {
+    try std.testing.expectEqual(HdrTransfer.pq, hdrTransfer(color_transfer_pq).?);
+    try std.testing.expectEqual(HdrTransfer.hlg, hdrTransfer(color_transfer_hlg).?);
+    try std.testing.expectEqual(@as(?HdrTransfer, null), hdrTransfer(color_transfer_bt709));
+
+    const output = outputColorInfo(.{
+        .range = color_range_mpeg,
+        .primaries = color_primaries_bt2020,
+        .transfer = color_transfer_pq,
+        .matrix = 9,
+    });
+    try std.testing.expectEqual(color_primaries_bt709, output.primaries);
+    try std.testing.expectEqual(color_transfer_bt709, output.transfer);
+    try std.testing.expectEqual(color_matrix_bt709, output.matrix);
+}
+
+test "HDR tone mapping curves are finite and monotonic" {
+    inline for (.{ HdrTransfer.pq, HdrTransfer.hlg }) |transfer| {
+        var previous: f64 = -1;
+        for (0..257) |index| {
+            const encoded = @as(f64, @floatFromInt(index)) / 256.0;
+            const linear = hdrToLinear(encoded, transfer);
+            try std.testing.expect(std.math.isFinite(linear));
+            try std.testing.expect(linear >= previous);
+            previous = linear;
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 0), floatToByte(bt709Oetf(0)));
+    try std.testing.expectEqual(@as(u8, 255), floatToByte(bt709Oetf(1)));
+    try std.testing.expect(acesToneMap(4) > acesToneMap(1));
 }
 
 test "swscale matrix follows metadata and resolution fallback" {
