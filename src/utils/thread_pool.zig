@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("sync.zig");
 const state_mod = @import("../app_state.zig");
 const media = @import("../core/media.zig");
 const engine = @import("../engine/engine.zig");
@@ -29,8 +30,8 @@ const Job = union(enum) {
 pub const ThreadPool = struct {
     allocator: std.mem.Allocator,
     state: *state_mod.AppState,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    condition: sync.Condition = .{},
     pending: ?Job = null,
     stopping: bool = false,
     thread: ?std.Thread = null,
@@ -236,7 +237,7 @@ const NativeProgress = struct {
             return 0;
         }
 
-        const now = std.time.nanoTimestamp();
+        const now = sync.nanoTimestamp();
         if (self.stage == null or self.stage.? != progress.stage or
             self.last_sample_ns == 0)
         {
@@ -248,14 +249,14 @@ const NativeProgress = struct {
         }
 
         const elapsed_ns = now - self.last_sample_ns;
-        if (elapsed_ns < 250 * std.time.ns_per_ms or
+        if (elapsed_ns < 250 * sync.ns_per_ms or
             progress.processed_frames < self.last_sample_frames)
         {
             return self.processing_speed;
         }
 
         const elapsed_seconds = @as(f64, @floatFromInt(elapsed_ns)) /
-            @as(f64, std.time.ns_per_s);
+            @as(f64, sync.ns_per_s);
         const frame_delta = progress.processed_frames -
             self.last_sample_frames;
         const sample = @as(f64, @floatFromInt(frame_delta)) /

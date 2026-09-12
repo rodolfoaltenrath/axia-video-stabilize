@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const diagnostics = @import("diagnostics.zig");
 const encoder_mod = @import("encoder.zig");
 const muxer = @import("muxer.zig");
@@ -352,9 +353,9 @@ const EncoderSink = struct {
 
 fn deleteFile(path: []const u8) void {
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.deleteFileAbsolute(path) catch {};
+        std.Io.Dir.deleteFileAbsolute(sync.io(), path) catch {};
     } else {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(sync.io(), path) catch {};
     }
 }
 
@@ -366,7 +367,7 @@ fn temporaryPath(
     return std.fmt.allocPrint(
         allocator,
         "{s}.axia-{s}-{x}.mp4",
-        .{ output_path, label, std.crypto.random.int(u64) },
+        .{ output_path, label, @as(u64, @truncate(@as(u128, @bitCast(sync.nanoTimestamp())))) },
     );
 }
 
@@ -374,9 +375,9 @@ fn publishFile(source: []const u8, destination: []const u8) !void {
     if (std.fs.path.isAbsolute(source) and
         std.fs.path.isAbsolute(destination))
     {
-        try std.fs.renameAbsolute(source, destination);
+        try std.Io.Dir.renameAbsolute(source, destination, sync.io());
     } else {
-        try std.fs.cwd().rename(source, destination);
+        try std.Io.Dir.cwd().rename(source, std.Io.Dir.cwd(), destination, sync.io());
     }
 }
 
@@ -384,11 +385,11 @@ test "publishing replaces an existing destination atomically" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
 
-    try temporary.dir.writeFile(.{
+    try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "source.mp4",
         .data = "new-video",
     });
-    try temporary.dir.writeFile(.{
+    try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "destination.mp4",
         .data = "old-video",
     });
@@ -411,15 +412,16 @@ test "publishing replaces an existing destination atomically" {
 
     try publishFile(source, destination);
     const contents = try temporary.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "destination.mp4",
-        64,
+        std.testing.allocator,
+        .limited(64),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings("new-video", contents);
     try std.testing.expectError(
         error.FileNotFound,
-        temporary.dir.openFile("source.mp4", .{}),
+        temporary.dir.openFile(std.testing.io, "source.mp4", .{}),
     );
 }
 

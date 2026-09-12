@@ -371,7 +371,7 @@ fn applyDynamic(
             {
                 while (tail > head and
                     requirements[deque[tail - 1]].zoom <=
-                    requirements[right].zoom)
+                        requirements[right].zoom)
                 {
                     tail -= 1;
                 }

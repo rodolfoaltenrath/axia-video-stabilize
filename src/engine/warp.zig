@@ -76,7 +76,7 @@ pub const AffineMatrix = extern struct {
 comptime {
     if (native_enabled and
         (@sizeOf(AffineMatrix) != @sizeOf(cv.AxiaAffine2d) or
-        @alignOf(AffineMatrix) != @alignOf(cv.AxiaAffine2d)))
+            @alignOf(AffineMatrix) != @alignOf(cv.AxiaAffine2d)))
     {
         @compileError("AxiaAffine2d ABI differs between Zig and OpenCV");
     }

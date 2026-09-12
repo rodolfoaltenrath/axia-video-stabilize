@@ -20,7 +20,7 @@ pub const ResolvedPosition = struct {
 pub const Timeline = struct {
     allocator: std.mem.Allocator,
     scale: u32,
-    clips: std.ArrayListUnmanaged(clip_mod.Clip) = .{},
+    clips: std.ArrayListUnmanaged(clip_mod.Clip) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, scale: u32) Error!Timeline {
         if (scale == 0) return error.InvalidTimelineScale;

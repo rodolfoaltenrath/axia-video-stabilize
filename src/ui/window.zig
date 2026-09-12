@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const rl = @import("raylib");
 const build_options = @import("build_options");
 const state_mod = @import("../app_state.zig");
@@ -324,7 +325,7 @@ fn drawPreview(
         preview.thumbnail_cell_width > 0 and
         preview.thumbnail_cell_height > 0;
     if (scrub_thumbnail_available) {
-        const draw_started = std.time.nanoTimestamp();
+        const draw_started = sync.nanoTimestamp();
         const thumbnail_index = preview_thumbnails.indexForProgress(preview.progress());
         rl.drawTexturePro(
             preview.thumbnail_texture.?,
@@ -341,9 +342,9 @@ fn drawPreview(
             0,
             rl.Color.white,
         );
-        const draw_elapsed = std.time.nanoTimestamp() - draw_started;
+        const draw_elapsed = sync.nanoTimestamp() - draw_started;
         draw_texture_ms = @as(f64, @floatFromInt(@max(0, draw_elapsed))) /
-            @as(f64, std.time.ns_per_ms);
+            @as(f64, sync.ns_per_ms);
         components.textStrong(
             "APROXIMAÇÃO",
             viewport.x + viewport.width - 94,
@@ -352,7 +353,7 @@ fn drawPreview(
             theme.text_muted,
         );
     } else if (preview.texture) |texture| {
-        const draw_started = std.time.nanoTimestamp();
+        const draw_started = sync.nanoTimestamp();
         rl.drawTexturePro(
             texture,
             .{
@@ -366,9 +367,9 @@ fn drawPreview(
             0,
             rl.Color.white,
         );
-        const draw_elapsed = std.time.nanoTimestamp() - draw_started;
+        const draw_elapsed = sync.nanoTimestamp() - draw_started;
         draw_texture_ms = @as(f64, @floatFromInt(@max(0, draw_elapsed))) /
-            @as(f64, std.time.ns_per_ms);
+            @as(f64, sync.ns_per_ms);
     }
 
     var empty_import_requested = false;

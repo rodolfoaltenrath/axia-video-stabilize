@@ -19,7 +19,7 @@ pub const Error = error{
 pub const Project = struct {
     allocator: std.mem.Allocator,
     name: []u8,
-    assets: std.ArrayListUnmanaged(media_asset.MediaAsset) = .{},
+    assets: std.ArrayListUnmanaged(media_asset.MediaAsset) = .empty,
     timeline: timeline_mod.Timeline,
     next_asset_id: u64 = 1,
     next_clip_id: u64 = 1,

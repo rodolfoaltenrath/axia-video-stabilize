@@ -137,9 +137,9 @@ const NativeRenderer = struct {
             const expected_timing = analysis.records[rendered_count].timing;
             if (frame.timing.pts != expected_timing.pts or
                 frame.timing.time_base.numerator !=
-                expected_timing.time_base.numerator or
+                    expected_timing.time_base.numerator or
                 frame.timing.time_base.denominator !=
-                expected_timing.time_base.denominator)
+                    expected_timing.time_base.denominator)
             {
                 return error.TimingMismatch;
             }

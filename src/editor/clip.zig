@@ -24,7 +24,7 @@ pub const Clip = struct {
     timeline_duration: time.Time,
     source_in: time.Time,
     source_out: time.Time,
-    effects: std.ArrayListUnmanaged(effect_mod.Effect) = .{},
+    effects: std.ArrayListUnmanaged(effect_mod.Effect) = .empty,
 
     pub fn create(
         allocator: std.mem.Allocator,

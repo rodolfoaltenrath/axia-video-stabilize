@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("utils/sync.zig");
 const stabilization_effect = @import("effects/stabilization.zig");
 
 pub const Phase = enum {
@@ -133,7 +134,7 @@ pub const Snapshot = struct {
 };
 
 pub const AppState = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: sync.Mutex = .{},
     phase: Phase = .idle,
     progress: f32 = 0.0,
     parameters: Parameters = .{},

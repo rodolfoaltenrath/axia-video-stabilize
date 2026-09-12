@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const sync = @import("../utils/sync.zig");
 
 pub const Command = struct {
     path: []const u8,
@@ -15,20 +16,19 @@ pub const Command = struct {
 /// directory and finally PATH. Keeping the bundled lookup here makes preview
 /// and export use exactly the same executable.
 pub fn resolve(allocator: std.mem.Allocator) error{OutOfMemory}!Command {
-    const override = std.process.getEnvVarOwned(
+    const override = sync.getEnvOwned(
         allocator,
         "AXIA_FFMPEG",
     ) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         error.OutOfMemory => return error.OutOfMemory,
-        else => null,
     };
     if (override) |path| {
         if (path.len > 0) return .{ .path = path, .owned_path = path };
         allocator.free(path);
     }
 
-    const executable_dir = std.fs.selfExeDirPathAlloc(allocator) catch |err| switch (err) {
+    const executable_dir = std.process.executableDirPathAlloc(sync.io(), allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .path = defaultCommand() },
     };
@@ -37,7 +37,7 @@ pub fn resolve(allocator: std.mem.Allocator) error{OutOfMemory}!Command {
         allocator,
         &.{ executable_dir, bundledFilename() },
     ) catch return error.OutOfMemory;
-    std.fs.accessAbsolute(candidate, .{}) catch {
+    std.Io.Dir.accessAbsolute(sync.io(), candidate, .{}) catch {
         allocator.free(candidate);
         return .{ .path = defaultCommand() };
     };
@@ -52,13 +52,7 @@ pub fn bundledFilename() []const u8 {
 /// shutdown. FFmpeg can ignore SIGTERM while blocked writing to a full pipe,
 /// which would make std.process.Child.kill() wait forever on POSIX systems.
 pub fn terminate(child: *std.process.Child) void {
-    if (builtin.os.tag == .windows) {
-        _ = child.kill() catch {};
-        return;
-    }
-
-    std.posix.kill(child.id, std.posix.SIG.KILL) catch {};
-    _ = child.wait() catch {};
+    child.kill(sync.io());
 }
 
 fn defaultCommand() []const u8 {

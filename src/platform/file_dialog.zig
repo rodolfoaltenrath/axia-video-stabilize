@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const builtin = @import("builtin");
 
 const windows = if (builtin.os.tag == .windows)
@@ -32,7 +33,7 @@ pub const AsyncSelector = struct {
     };
 
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
+    mutex: sync.Mutex = .{},
     thread: ?std.Thread = null,
     status: Status = .idle,
     selected_path: ?[]u8 = null,
@@ -208,10 +209,10 @@ fn runDialog(
     allocator: std.mem.Allocator,
     arguments: []const []const u8,
 ) FileDialogError!?[]u8 {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, sync.io(), .{
         .argv = arguments,
-        .max_output_bytes = 64 * 1024,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.FileNotFound => return error.BackendUnavailable,
@@ -221,7 +222,7 @@ fn runDialog(
     defer allocator.free(result.stderr);
 
     return switch (result.term) {
-        .Exited => |code| switch (code) {
+        .exited => |code| switch (code) {
             0 => @as(?[]u8, try parseSelectedPath(allocator, result.stdout)),
             1 => null,
             else => error.DialogFailed,
@@ -234,7 +235,7 @@ fn parseSelectedPath(
     allocator: std.mem.Allocator,
     output: []const u8,
 ) FileDialogError![]u8 {
-    const path = std.mem.trimRight(u8, output, "\r\n");
+    const path = std.mem.trimEnd(u8, output, "\r\n");
     if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) {
         return error.InvalidPathEncoding;
     }

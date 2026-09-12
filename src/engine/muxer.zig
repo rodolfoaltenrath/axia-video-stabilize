@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const build_options = @import("build_options");
 const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
 
@@ -11,7 +12,6 @@ const ffmpeg = if (build_options.native_ffmpeg) @cImport({
 
 pub const native_enabled = build_options.native_ffmpeg;
 
-const transcode_poll_interval = 100 * std.time.ns_per_ms;
 const TranscodePipe = enum { stdout };
 
 pub const Progress = struct {
@@ -522,14 +522,14 @@ fn transcodeAudioToAac(
     );
     defer allocator.free(rotation_text);
 
-    var arguments = std.ArrayList([]const u8).init(allocator);
-    defer arguments.deinit();
-    var owned_arguments = std.ArrayList([]u8).init(allocator);
+    var arguments: std.ArrayList([]const u8) = .empty;
+    defer arguments.deinit(allocator);
+    var owned_arguments: std.ArrayList([]u8) = .empty;
     defer {
         for (owned_arguments.items) |argument| allocator.free(argument);
-        owned_arguments.deinit();
+        owned_arguments.deinit(allocator);
     }
-    try arguments.appendSlice(&.{
+    try arguments.appendSlice(allocator, &.{
         command.path,
         "-hide_banner",
         "-loglevel",
@@ -539,12 +539,12 @@ fn transcodeAudioToAac(
     if (std.math.isFinite(options.display_rotation_degrees) and
         @abs(options.display_rotation_degrees) >= 0.5)
     {
-        try arguments.appendSlice(&.{
+        try arguments.appendSlice(allocator, &.{
             "-display_rotation",
             rotation_text,
         });
     }
-    try arguments.appendSlice(&.{
+    try arguments.appendSlice(allocator, &.{
         "-i",
         video_path,
         "-i",
@@ -569,7 +569,7 @@ fn transcodeAudioToAac(
                 "-c:a:{d}",
                 .{output_audio_index},
             );
-            owned_arguments.append(codec_option) catch |err| {
+            owned_arguments.append(allocator, codec_option) catch |err| {
                 allocator.free(codec_option);
                 return err;
             };
@@ -578,11 +578,11 @@ fn transcodeAudioToAac(
                 "-b:a:{d}",
                 .{output_audio_index},
             );
-            owned_arguments.append(bitrate_option) catch |err| {
+            owned_arguments.append(allocator, bitrate_option) catch |err| {
                 allocator.free(bitrate_option);
                 return err;
             };
-            try arguments.appendSlice(&.{
+            try arguments.appendSlice(allocator, &.{
                 codec_option,
                 "aac",
                 bitrate_option,
@@ -592,7 +592,7 @@ fn transcodeAudioToAac(
         output_audio_index += 1;
     }
     if (options.copy_metadata) {
-        try arguments.appendSlice(&.{
+        try arguments.appendSlice(allocator, &.{
             "-map_metadata",
             "1",
             "-map_metadata:s:v:0",
@@ -600,9 +600,9 @@ fn transcodeAudioToAac(
         });
     }
     if (options.faststart) {
-        try arguments.appendSlice(&.{ "-movflags", "+faststart" });
+        try arguments.appendSlice(allocator, &.{ "-movflags", "+faststart" });
     }
-    try arguments.appendSlice(&.{
+    try arguments.appendSlice(allocator, &.{
         "-progress",
         "pipe:1",
         "-nostats",
@@ -610,31 +610,24 @@ fn transcodeAudioToAac(
         output_path,
     });
 
-    var child = std.process.Child.init(arguments.items, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Inherit;
-    child.expand_arg0 = .expand;
-    child.spawn() catch |err| switch (err) {
+    var child = std.process.spawn(sync.io(), .{
+        .argv = arguments.items,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .inherit,
+        .expand_arg0 = .expand,
+    }) catch |err| switch (err) {
         error.FileNotFound => return error.TranscoderNotFound,
         else => return error.AudioTranscodeFailed,
     };
 
     var child_terminated = false;
     defer if (!child_terminated) {
-        _ = child.kill() catch {};
+        child.kill(sync.io());
     };
     const stdout = child.stdout orelse return error.AudioTranscodeFailed;
-    var poller = std.io.poll(
-        allocator,
-        TranscodePipe,
-        .{ .stdout = stdout },
-    );
-    defer poller.deinit();
-    var chunk: [2048]u8 = undefined;
-    var progress_line: [256]u8 = undefined;
-    var progress_line_len: usize = 0;
-    var progress_line_overflow = false;
+    var read_buffer: [4096]u8 = undefined;
+    var file_reader = stdout.reader(sync.io(), &read_buffer);
 
     options.observer.report(.{
         .processed_packets = 0,
@@ -643,47 +636,26 @@ fn transcodeAudioToAac(
     });
     while (true) {
         if (options.observer.isCancelled()) {
-            _ = child.kill() catch return error.AudioTranscodeFailed;
+            child.kill(sync.io());
             child_terminated = true;
             return error.Cancelled;
         }
-        const pipe_open = poller.pollTimeout(transcode_poll_interval) catch
+        const line = file_reader.interface.takeDelimiter('\n') catch
             return error.AudioTranscodeFailed;
-        const fifo = poller.fifo(.stdout);
-        while (fifo.count > 0) {
-            const count = fifo.read(chunk[0..@min(chunk.len, fifo.count)]);
-            for (chunk[0..count]) |byte| {
-                if (byte == '\n') {
-                    if (!progress_line_overflow) {
-                        if (transcodeProgressSeconds(
-                            progress_line[0..progress_line_len],
-                        )) |seconds| {
-                            options.observer.report(.{
-                                .processed_packets = audio_stream_count,
-                                .processed_seconds = seconds,
-                                .total_seconds = total_duration_seconds,
-                            });
-                        }
-                    }
-                    progress_line_len = 0;
-                    progress_line_overflow = false;
-                } else if (!progress_line_overflow) {
-                    if (progress_line_len < progress_line.len) {
-                        progress_line[progress_line_len] = byte;
-                        progress_line_len += 1;
-                    } else {
-                        progress_line_overflow = true;
-                    }
-                }
-            }
+        const progress_line = line orelse break;
+        if (transcodeProgressSeconds(progress_line)) |seconds| {
+            options.observer.report(.{
+                .processed_packets = audio_stream_count,
+                .processed_seconds = seconds,
+                .total_seconds = total_duration_seconds,
+            });
         }
-        if (!pipe_open and fifo.count == 0) break;
     }
 
-    const term = child.wait() catch return error.AudioTranscodeFailed;
+    const term = child.wait(sync.io()) catch return error.AudioTranscodeFailed;
     child_terminated = true;
     const success = switch (term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     };
     if (!success) return error.AudioTranscodeFailed;
@@ -870,7 +842,7 @@ fn writePacket(
     }
 }
 
-fn interruptIo(raw_context: ?*anyopaque) callconv(.C) c_int {
+fn interruptIo(raw_context: ?*anyopaque) callconv(.c) c_int {
     const observer: *const Observer = @ptrCast(@alignCast(raw_context.?));
     return if (observer.isCancelled()) 1 else 0;
 }

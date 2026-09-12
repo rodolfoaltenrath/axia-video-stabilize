@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-required_version="0.13.0"
+required_version="0.16.0"
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 if [ -n "${AXIA_ZIG:-}" ]; then
@@ -20,7 +20,8 @@ fi
 
 for candidate in \
     "$project_dir/.tools/zig" \
-    "$project_dir/../axia-visualizer/.tools/zig-linux-x86_64-0.13.0/zig"
+    "$project_dir/.tools/zig-linux-x86_64-0.16.0/zig" \
+    "$project_dir/../axia-visualizer/.tools/zig-linux-x86_64-0.16.0/zig"
 do
     if [ -x "$candidate" ] && [ "$($candidate version 2>/dev/null)" = "$required_version" ]; then
         exec "$candidate" "$@"
@@ -36,7 +37,7 @@ if [ -n "$system_zig" ]; then
 fi
 
 printf 'O Axia requer Zig %s, mas o Zig compatível não foi encontrado.\n' "$required_version" >&2
-printf 'Defina AXIA_ZIG=/caminho/para/zig-0.13.0 ou instale-o em .tools/zig.\n' >&2
+printf 'Defina AXIA_ZIG=/caminho/para/zig-0.16.0 ou instale-o em .tools/zig.\n' >&2
 if [ -n "${actual_version:-}" ]; then
     printf 'Versão encontrada no PATH: %s.\n' "$actual_version" >&2
 fi

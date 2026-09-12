@@ -1,8 +1,8 @@
 """Adapta comandos de build C/C++ convencionais ao driver do Zig.
 
-O CMake usa ``-Wl,-v`` apenas para identificar o linker, mas o driver do Zig
-0.13 não reconhece essa forma. O adaptador remove somente essa sondagem e
-preserva todas as demais opções do build.
+O CMake usa ``-Wl,-v`` apenas para identificar o linker. O adaptador remove
+essa sondagem quando ela não é aceita pelo driver do Zig e preserva todas as
+demais opções do build.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def main() -> int:
         if argument not in ("-Wl,-v", "-lpthread")
     ]
     if "-E" in arguments:
-        # Clang treats `-o -` as stdout while Zig 0.13 creates a literal file
+        # Clang treats `-o -` as stdout while some Zig drivers create a literal file
         # named "-". Omitting the pair preserves the intended preprocess output.
         arguments = [
             argument

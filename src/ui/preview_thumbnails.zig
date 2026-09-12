@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
 
 pub const count: u32 = 10;
@@ -9,14 +10,11 @@ pub const Dimensions = struct {
     height: u32,
 };
 
-const poll_interval = 100 * std.time.ns_per_ms;
-const ProgressPipe = enum { progress };
-
 pub const Status = enum { idle, waiting, building, ready, failed };
 
 pub const Job = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
+    mutex: sync.Mutex = .{},
     thread: ?std.Thread = null,
     source_path: ?[]u8 = null,
     output_path: ?[]u8 = null,
@@ -170,36 +168,35 @@ pub const Job = struct {
             "-an",        "-sn",          "-dn",       "-progress",        "pipe:1",
             "-nostats",   "-update",      "1",         "-y",               self.partial_path.?,
         };
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
-        child.expand_arg0 = .expand;
-        try child.spawn();
+        var child = try std.process.spawn(sync.io(), .{
+            .argv = &argv,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .inherit,
+            .expand_arg0 = .expand,
+        });
         var child_terminated = false;
         defer if (!child_terminated) ffmpeg_command.terminate(&child);
 
         const stdout = child.stdout orelse return error.MissingThumbnailProgressPipe;
-        var poller = std.io.poll(self.allocator, ProgressPipe, .{ .progress = stdout });
-        defer poller.deinit();
+        var read_buffer: [4096]u8 = undefined;
+        var file_reader = stdout.reader(sync.io(), &read_buffer);
         while (true) {
             if (self.cancelled()) {
                 ffmpeg_command.terminate(&child);
                 child_terminated = true;
                 return;
             }
-            const pipe_open = try poller.pollTimeout(poll_interval);
-            poller.fifo(.progress).discard(poller.fifo(.progress).count);
-            if (!pipe_open) break;
+            _ = try file_reader.interface.takeDelimiter('\n') orelse break;
         }
-        const term = try child.wait();
+        const term = try child.wait(sync.io());
         child_terminated = true;
         const success = switch (term) {
-            .Exited => |code| code == 0,
+            .exited => |code| code == 0,
             else => false,
         };
         if (!success or !validPng(self.partial_path.?)) return error.ThumbnailEncodingFailed;
-        try std.fs.renameAbsolute(self.partial_path.?, self.output_path.?);
+        try std.Io.Dir.renameAbsolute(self.partial_path.?, self.output_path.?, sync.io());
         self.setTerminal(.ready);
     }
 };
@@ -215,17 +212,17 @@ fn thumbnailPaths(
     preview_height: u32,
 ) !Paths {
     const stat = if (std.fs.path.isAbsolute(source_path)) blk: {
-        var file = try std.fs.openFileAbsolute(source_path, .{});
-        defer file.close();
-        break :blk try file.stat();
-    } else try std.fs.cwd().statFile(source_path);
+        const file = try std.Io.Dir.openFileAbsolute(sync.io(), source_path, .{});
+        defer file.close(sync.io());
+        break :blk try file.stat(sync.io());
+    } else try std.Io.Dir.cwd().statFile(sync.io(), source_path, .{});
     const identity = try std.fmt.allocPrint(
         allocator,
         "v2\x00{s}\x00{d}\x00{d}\x00{d:.6}\x00{d}x{d}x{d}",
         .{
             source_path,
             stat.size,
-            if (include_source_mtime) stat.mtime else 0,
+            if (include_source_mtime) stat.mtime.nanoseconds else 0,
             duration,
             preview_width,
             preview_height,
@@ -238,7 +235,7 @@ fn thumbnailPaths(
     defer allocator.free(filename);
     const root = try thumbnailCacheRoot(allocator);
     defer allocator.free(root);
-    try std.fs.cwd().makePath(root);
+    try std.Io.Dir.cwd().createDirPath(sync.io(), root);
     const output = try std.fs.path.join(allocator, &.{ root, filename });
     errdefer allocator.free(output);
     const partial = try std.fmt.allocPrint(allocator, "{s}.partial.png", .{output});
@@ -246,11 +243,11 @@ fn thumbnailPaths(
 }
 
 fn thumbnailCacheRoot(allocator: std.mem.Allocator) ![]u8 {
-    if (std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME")) |base| {
+    if (sync.getEnvOwned(allocator, "XDG_CACHE_HOME")) |base| {
         defer allocator.free(base);
         if (base.len > 0) return std.fs.path.join(allocator, &.{ base, "axia", "thumbnails", "v2" });
     } else |_| {}
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try sync.getEnvOwned(allocator, "HOME");
     defer allocator.free(home);
     return std.fs.path.join(allocator, &.{ home, ".cache", "axia", "thumbnails", "v2" });
 }
@@ -289,12 +286,12 @@ fn evenDimension(value: u32) u32 {
 }
 
 fn validPng(path: []const u8) bool {
-    var file = std.fs.openFileAbsolute(path, .{}) catch return false;
-    defer file.close();
-    const stat = file.stat() catch return false;
+    const file = std.Io.Dir.openFileAbsolute(sync.io(), path, .{}) catch return false;
+    defer file.close(sync.io());
+    const stat = file.stat(sync.io()) catch return false;
     if (stat.kind != .file or stat.size < 128) return false;
     var signature: [8]u8 = undefined;
-    const bytes_read = file.readAll(&signature) catch return false;
+    const bytes_read = file.readPositionalAll(sync.io(), &signature, 0) catch return false;
     return bytes_read == signature.len and
         std.mem.eql(u8, &signature, "\x89PNG\r\n\x1a\n");
 }

@@ -1,10 +1,9 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const builtin = @import("builtin");
 const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
 
-const poll_interval = 100 * std.time.ns_per_ms;
 const maximum_cache_bytes: u64 = 5 * 1024 * 1024 * 1024;
-const ProxyPipe = enum { progress };
 
 pub const Status = enum {
     idle,
@@ -33,7 +32,7 @@ pub const Options = struct {
 /// versioned file under the user's cache directory is published.
 pub const Job = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
+    mutex: sync.Mutex = .{},
     thread: ?std.Thread = null,
     source_path: ?[]u8 = null,
     output_path: ?[]u8 = null,
@@ -239,12 +238,13 @@ pub const Job = struct {
             self.partial_path.?,
         };
 
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
-        child.expand_arg0 = .expand;
-        try child.spawn();
+        var child = try std.process.spawn(sync.io(), .{
+            .argv = &argv,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .inherit,
+            .expand_arg0 = .expand,
+        });
 
         var child_terminated = false;
         defer if (!child_terminated) {
@@ -252,9 +252,8 @@ pub const Job = struct {
         };
 
         const stdout = child.stdout orelse return error.MissingProgressPipe;
-        var poller = std.io.poll(self.allocator, ProxyPipe, .{ .progress = stdout });
-        defer poller.deinit();
-        try poller.fifo(.progress).ensureUnusedCapacity(4096);
+        var read_buffer: [4096]u8 = undefined;
+        var file_reader = stdout.reader(sync.io(), &read_buffer);
 
         while (true) {
             if (self.cancelled()) {
@@ -262,21 +261,20 @@ pub const Job = struct {
                 child_terminated = true;
                 return;
             }
-            const pipe_open = try poller.pollTimeout(poll_interval);
-            parseProgress(self, poller.fifo(.progress));
-            if (!pipe_open and poller.fifo(.progress).count == 0) break;
+            const line = try file_reader.interface.takeDelimiter('\n') orelse break;
+            parseProgressLine(self, line);
         }
 
-        const term = try child.wait();
+        const term = try child.wait(sync.io());
         child_terminated = true;
         const success = switch (term) {
-            .Exited => |code| code == 0,
+            .exited => |code| code == 0,
             else => false,
         };
         if (!success or !absoluteFileIsUsable(self.partial_path.?)) {
             return error.ProxyEncodingFailed;
         }
-        try std.fs.renameAbsolute(self.partial_path.?, self.output_path.?);
+        try std.Io.Dir.renameAbsolute(self.partial_path.?, self.output_path.?, sync.io());
         pruneCache(self.allocator, cache_root, self.output_path.?, maximum_cache_bytes) catch |err| {
             std.log.warn("could not prune preview cache: {s}", .{@errorName(err)});
         };
@@ -295,17 +293,17 @@ fn proxyPaths(
     options: Options,
 ) !ProxyPaths {
     const stat = if (std.fs.path.isAbsolute(source_path)) blk: {
-        var file = try std.fs.openFileAbsolute(source_path, .{});
-        defer file.close();
-        break :blk try file.stat();
-    } else try std.fs.cwd().statFile(source_path);
+        const file = try std.Io.Dir.openFileAbsolute(sync.io(), source_path, .{});
+        defer file.close(sync.io());
+        break :blk try file.stat(sync.io());
+    } else try std.Io.Dir.cwd().statFile(sync.io(), source_path, .{});
     const identity = try std.fmt.allocPrint(
         allocator,
         "v2\x00{s}\x00{d}\x00{d}\x00{d}x{d}\x00{d}x{d}\x00{d:.6}\x00{}",
         .{
             source_path,
             stat.size,
-            stat.mtime,
+            stat.mtime.nanoseconds,
             options.source_width,
             options.source_height,
             options.width,
@@ -321,7 +319,7 @@ fn proxyPaths(
 
     const root = try proxyCacheRoot(allocator);
     defer allocator.free(root);
-    try std.fs.cwd().makePath(root);
+    try std.Io.Dir.cwd().createDirPath(sync.io(), root);
     const output = try std.fs.path.join(allocator, &.{ root, filename });
     errdefer allocator.free(output);
     const partial = try std.fmt.allocPrint(allocator, "{s}.partial.mp4", .{output});
@@ -329,18 +327,19 @@ fn proxyPaths(
 }
 
 fn proxyCacheRoot(allocator: std.mem.Allocator) ![]u8 {
-    if (std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME")) |base| {
+    if (sync.getEnvOwned(allocator, "XDG_CACHE_HOME")) |base| {
         defer allocator.free(base);
         if (base.len > 0) return std.fs.path.join(allocator, &.{ base, "axia", "proxies", "v2" });
     } else |_| {}
 
     if (builtin.os.tag == .windows) {
-        const base = try std.fs.getAppDataDir(allocator, "Axia");
+        const base = sync.getEnvOwned(allocator, "LOCALAPPDATA") catch
+            try sync.getEnvOwned(allocator, "APPDATA");
         defer allocator.free(base);
-        return std.fs.path.join(allocator, &.{ base, "cache", "proxies", "v2" });
+        return std.fs.path.join(allocator, &.{ base, "Axia", "cache", "proxies", "v2" });
     }
 
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try sync.getEnvOwned(allocator, "HOME");
     defer allocator.free(home);
     return std.fs.path.join(allocator, &.{ home, ".cache", "axia", "proxies", "v2" });
 }
@@ -378,21 +377,20 @@ fn buildFilter(
 }
 
 fn absoluteFileIsUsable(path: []const u8) bool {
-    var file = std.fs.openFileAbsolute(path, .{}) catch return false;
-    defer file.close();
-    const stat = file.stat() catch return false;
+    const file = std.Io.Dir.openFileAbsolute(sync.io(), path, .{}) catch return false;
+    defer file.close(sync.io());
+    const stat = file.stat(sync.io()) catch return false;
     if (stat.kind != .file or stat.size < 1024) return false;
 
     var header: [12]u8 = undefined;
-    const bytes_read = file.readAll(&header) catch return false;
+    const bytes_read = file.readPositionalAll(sync.io(), &header, 0) catch return false;
     return bytes_read == header.len and std.mem.eql(u8, header[4..8], "ftyp");
 }
 
 fn touchCacheEntry(path: []const u8) void {
-    var file = std.fs.openFileAbsolute(path, .{}) catch return;
-    defer file.close();
-    const now = std.time.nanoTimestamp();
-    file.updateTimes(now, now) catch {};
+    const file = std.Io.Dir.openFileAbsolute(sync.io(), path, .{}) catch return;
+    defer file.close(sync.io());
+    file.setTimestampsNow(sync.io()) catch {};
 }
 
 const CacheEntry = struct {
@@ -408,33 +406,33 @@ fn pruneCache(
     preserved_path: []const u8,
     maximum_bytes: u64,
 ) !void {
-    var directory = try std.fs.openDirAbsolute(root, .{ .iterate = true });
-    defer directory.close();
+    const directory = try std.Io.Dir.openDirAbsolute(sync.io(), root, .{ .iterate = true });
+    defer directory.close(sync.io());
 
-    var entries = std.ArrayList(CacheEntry).init(allocator);
+    var entries: std.ArrayList(CacheEntry) = .empty;
     defer {
         for (entries.items) |entry| allocator.free(entry.name);
-        entries.deinit();
+        entries.deinit(allocator);
     }
 
     const preserved_name = std.fs.path.basename(preserved_path);
     var total_size: u64 = 0;
     var iterator = directory.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(sync.io())) |entry| {
         if (entry.kind != .file or
             !std.mem.endsWith(u8, entry.name, ".mp4") or
             std.mem.endsWith(u8, entry.name, ".partial.mp4"))
         {
             continue;
         }
-        const stat = directory.statFile(entry.name) catch continue;
+        const stat = directory.statFile(sync.io(), entry.name, .{}) catch continue;
         total_size +|= stat.size;
         const owned_name = try allocator.dupe(u8, entry.name);
         errdefer allocator.free(owned_name);
-        try entries.append(.{
+        try entries.append(allocator, .{
             .name = owned_name,
             .size = stat.size,
-            .mtime = stat.mtime,
+            .mtime = stat.mtime.nanoseconds,
             .preserved = std.mem.eql(u8, entry.name, preserved_name),
         });
     }
@@ -448,33 +446,25 @@ fn pruneCache(
     for (entries.items) |entry| {
         if (total_size <= maximum_bytes) break;
         if (entry.preserved) continue;
-        directory.deleteFile(entry.name) catch continue;
+        directory.deleteFile(sync.io(), entry.name) catch continue;
         total_size -= entry.size;
     }
 }
 
-fn parseProgress(job: *Job, fifo: anytype) void {
-    fifo.realign();
-    while (true) {
-        const available = fifo.readableSlice(0);
-        const newline = std.mem.indexOfScalar(u8, available, '\n') orelse return;
-        const raw_line = std.mem.trimRight(u8, available[0..newline], "\r");
-        if (std.mem.startsWith(u8, raw_line, "out_time_us=")) {
-            const value = std.fmt.parseInt(u64, raw_line["out_time_us=".len..], 10) catch 0;
-            if (job.options.duration_seconds > 0) {
-                const seconds = @as(f64, @floatFromInt(value)) / 1_000_000.0;
-                job.setProgress(@floatCast(seconds / job.options.duration_seconds));
-            }
-        } else if (std.mem.startsWith(u8, raw_line, "frame=")) {
-            const frame = std.fmt.parseInt(u64, raw_line["frame=".len..], 10) catch 0;
-            const total_frames = job.options.duration_seconds * job.options.fps;
-            if (total_frames > 0) {
-                job.setProgress(@floatCast(
-                    @as(f64, @floatFromInt(frame)) / total_frames,
-                ));
-            }
+fn parseProgressLine(job: *Job, line: []const u8) void {
+    const raw_line = std.mem.trimEnd(u8, line, "\r");
+    if (std.mem.startsWith(u8, raw_line, "out_time_us=")) {
+        const value = std.fmt.parseInt(u64, raw_line["out_time_us=".len..], 10) catch 0;
+        if (job.options.duration_seconds > 0) {
+            const seconds = @as(f64, @floatFromInt(value)) / 1_000_000.0;
+            job.setProgress(@floatCast(seconds / job.options.duration_seconds));
         }
-        fifo.discard(newline + 1);
+    } else if (std.mem.startsWith(u8, raw_line, "frame=")) {
+        const frame = std.fmt.parseInt(u64, raw_line["frame=".len..], 10) catch 0;
+        const total_frames = job.options.duration_seconds * job.options.fps;
+        if (total_frames > 0) {
+            job.setProgress(@floatCast(@as(f64, @floatFromInt(frame)) / total_frames));
+        }
     }
 }
 
@@ -489,14 +479,11 @@ test "proxy progress follows encoded media time" {
         .duration_seconds = 10,
         .hdr = false,
     };
-    var fifo = std.fifo.LinearFifo(u8, .Dynamic).init(std.testing.allocator);
-    defer fifo.deinit();
-    try fifo.writer().writeAll("frame=75\nout_time_us=2500000\nprogress=continue\n");
-
-    parseProgress(&job, &fifo);
+    parseProgressLine(&job, "frame=75");
+    parseProgressLine(&job, "out_time_us=2500000");
+    parseProgressLine(&job, "progress=continue");
 
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), job.snapshot().progress, 0.0001);
-    try std.testing.expectEqual(@as(usize, 0), fifo.count);
 }
 
 test "HDR proxy limits float tone mapping to twice the preview size" {
@@ -529,14 +516,17 @@ test "proxy cache removes least recently used entries and preserves active outpu
 
     const names = [_][]const u8{ "old.mp4", "recent.mp4", "active.mp4" };
     for (names, 0..) |name, index| {
-        var file = try temporary.dir.createFile(name, .{});
-        defer file.close();
-        try file.writeAll("0123456789abcdef");
-        const timestamp: i128 = @intCast(index + 1);
-        try file.updateTimes(timestamp, timestamp);
+        const file = try temporary.dir.createFile(std.testing.io, name, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "0123456789abcdef");
+        const timestamp: std.Io.Timestamp = .{ .nanoseconds = @intCast(index + 1) };
+        try file.setTimestamps(std.testing.io, .{
+            .access_timestamp = .{ .new = timestamp },
+            .modify_timestamp = .{ .new = timestamp },
+        });
     }
 
-    const root = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const preserved = try std.fs.path.join(
         std.testing.allocator,
@@ -546,7 +536,7 @@ test "proxy cache removes least recently used entries and preserves active outpu
 
     try pruneCache(std.testing.allocator, root, preserved, 32);
 
-    try std.testing.expectError(error.FileNotFound, temporary.dir.access("old.mp4", .{}));
-    try temporary.dir.access("recent.mp4", .{});
-    try temporary.dir.access("active.mp4", .{});
+    try std.testing.expectError(error.FileNotFound, temporary.dir.access(std.testing.io, "old.mp4", .{}));
+    try temporary.dir.access(std.testing.io, "recent.mp4", .{});
+    try temporary.dir.access(std.testing.io, "active.mp4", .{});
 }

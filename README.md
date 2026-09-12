@@ -26,7 +26,7 @@ encoding. SDR inputs retain their original color metadata.
 
 ## Requirements
 
-- Zig 0.13.0 (the project is not yet compatible with Zig 0.16)
+- Zig 0.16.0
 - FFmpeg development libraries, including avcodec, avformat, avutil and swscale
 - OpenCV development libraries used by the small bridge in `native/`
 - The `ffmpeg` executable on `PATH` for the graphical video preview,
@@ -49,8 +49,8 @@ sudo dnf install gcc-c++ ffmpeg-devel opencv-devel \
 Use `ffmpeg-free-devel` in place of `ffmpeg-devel` only when the system uses
 Fedora's `ffmpeg-free` packages instead of RPM Fusion FFmpeg.
 
-Raylib 5.5 is downloaded and compiled by Zig. It creates the OpenGL 3.3 window
-and keeps the repository independent from a global GUI installation.
+Raylib 6.0 bindings are downloaded and compiled by Zig. They create the OpenGL
+3.3 window and keep the repository independent from a global GUI installation.
 Montserrat Regular and SemiBold are embedded in the executable. Their OFL 1.1
 license is included in `src/assets/fonts/OFL.txt`.
 
@@ -69,7 +69,7 @@ in both executables. Check it without starting the graphical application:
 ./zigw build cli -- --version
 ```
 
-`zigw` selects Zig 0.13.0 without replacing a newer system Zig. It checks
+`zigw` selects Zig 0.16.0 without replacing another system Zig. It checks
 `AXIA_ZIG`, `.tools/zig`, the adjacent development toolchain and finally
 `PATH`, and reports a clear version error when none is compatible.
 

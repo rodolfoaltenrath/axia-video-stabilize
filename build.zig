@@ -60,10 +60,13 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "axia-video-stabilize",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
         .version = semantic_version,
+        .use_lld = if (target.result.os.tag == .linux) false else null,
     });
 
     const build_options = b.addOptions();
@@ -76,8 +79,8 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "test_video_require_vfr", test_video_require_vfr);
     exe.root_module.addOptions("build_options", build_options);
     exe.root_module.addImport("raylib", raylib_dep.module("raylib"));
-    exe.linkLibrary(raylib_dep.artifact("raylib"));
-    exe.linkLibC();
+    exe.root_module.linkLibrary(raylib_dep.artifact("raylib"));
+    exe.root_module.link_libc = true;
     linkNativeDependencies(
         b,
         exe,
@@ -97,13 +100,13 @@ pub fn build(b: *std.Build) void {
     // links document and enforce the desktop renderer requested by the app.
     switch (target.result.os.tag) {
         .windows => {
-            exe.linkSystemLibrary("opengl32");
-            exe.linkSystemLibrary("comdlg32");
+            exe.root_module.linkSystemLibrary("opengl32", .{});
+            exe.root_module.linkSystemLibrary("comdlg32", .{});
         },
         .linux => {
-            exe.linkSystemLibrary("GL");
-            exe.linkSystemLibrary("pthread");
-            exe.linkSystemLibrary("dl");
+            exe.root_module.linkSystemLibrary("GL", .{});
+            exe.root_module.linkSystemLibrary("pthread", .{});
+            exe.root_module.linkSystemLibrary("dl", .{});
         },
         else => {},
     }
@@ -112,13 +115,16 @@ pub fn build(b: *std.Build) void {
 
     const cli = b.addExecutable(.{
         .name = "axia-cli",
-        .root_source_file = b.path("src/cli.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
         .version = semantic_version,
+        .use_lld = if (target.result.os.tag == .linux) false else null,
     });
     cli.root_module.addOptions("build_options", build_options);
-    cli.linkLibC();
+    cli.root_module.link_libc = true;
     linkNativeDependencies(
         b,
         cli,
@@ -139,7 +145,7 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     configureLinuxRuntime(b, run_cmd, target.result.os.tag, ffmpeg_lib, opencv_lib);
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run Zig Stabilizer");
+    const run_step = b.step("run", "Run Axia Editor");
     run_step.dependOn(&run_cmd.step);
 
     const cli_cmd = b.addRunArtifact(cli);
@@ -149,12 +155,15 @@ pub fn build(b: *std.Build) void {
     cli_step.dependOn(&cli_cmd.step);
 
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/tests.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .use_lld = if (target.result.os.tag == .linux) false else null,
     });
     unit_tests.root_module.addOptions("build_options", build_options);
-    unit_tests.linkLibC();
+    unit_tests.root_module.link_libc = true;
     linkNativeDependencies(
         b,
         unit_tests,
@@ -177,9 +186,10 @@ pub fn build(b: *std.Build) void {
 
 fn packageVersion(b: *std.Build) []const u8 {
     const manifest = b.build_root.handle.readFileAlloc(
-        b.allocator,
+        b.graph.io,
         "build.zig.zon",
-        64 * 1024,
+        b.allocator,
+        .limited(64 * 1024),
     ) catch @panic("could not read build.zig.zon");
     const marker = ".version = \"";
     const marker_index = std.mem.indexOf(u8, manifest, marker) orelse
@@ -200,9 +210,9 @@ fn installedDependencyRoot(
 ) ?[]const u8 {
     if (target_os != .windows) return null;
 
-    const local_app_data = std.process.getEnvVarOwned(b.allocator, "LOCALAPPDATA") catch return null;
+    const local_app_data = b.graph.environ_map.get("LOCALAPPDATA") orelse return null;
     const root = b.pathJoin(&.{ local_app_data, "Programs", "AxiaDeps", directory });
-    std.fs.accessAbsolute(root, .{}) catch return null;
+    std.Io.Dir.accessAbsolute(b.graph.io, root, .{}) catch return null;
     return root;
 }
 
@@ -212,23 +222,23 @@ fn installedLinuxDependencyRoot(
 ) ?[]const u8 {
     if (target_os != .linux) return null;
 
-    if (std.process.getEnvVarOwned(b.allocator, "AXIA_DEPS_ROOT")) |root| {
+    if (b.graph.environ_map.get("AXIA_DEPS_ROOT")) |root| {
         if (isLinuxDependencyRoot(b, root)) return root;
-    } else |_| {}
+    }
 
     if (isLinuxDependencyRoot(b, "/usr")) return "/usr";
 
-    const data_home = std.process.getEnvVarOwned(b.allocator, "XDG_DATA_HOME") catch blk: {
-        const user_home = std.process.getEnvVarOwned(b.allocator, "HOME") catch return null;
+    const data_home = b.graph.environ_map.get("XDG_DATA_HOME") orelse blk: {
+        const user_home = b.graph.environ_map.get("HOME") orelse return null;
         break :blk b.pathJoin(&.{ user_home, ".local", "share" });
     };
     const dependencies_dir = b.pathJoin(&.{ data_home, "axia-deps" });
-    var directory = std.fs.openDirAbsolute(dependencies_dir, .{ .iterate = true }) catch return null;
-    defer directory.close();
+    const directory = std.Io.Dir.openDirAbsolute(b.graph.io, dependencies_dir, .{ .iterate = true }) catch return null;
+    defer directory.close(b.graph.io);
 
     var best_root: ?[]const u8 = null;
     var iterator = directory.iterate();
-    while (iterator.next() catch return best_root) |entry| {
+    while (iterator.next(b.graph.io) catch return best_root) |entry| {
         if (entry.kind != .directory) continue;
         const candidate = b.pathJoin(&.{ dependencies_dir, entry.name, "root", "usr" });
         if (!isLinuxDependencyRoot(b, candidate)) continue;
@@ -246,7 +256,7 @@ fn isLinuxDependencyRoot(b: *std.Build, root: []const u8) bool {
         "lib64",
     }) |required_path| {
         const path = b.pathJoin(&.{ root, required_path });
-        std.fs.accessAbsolute(path, .{}) catch return false;
+        std.Io.Dir.accessAbsolute(b.graph.io, path, .{}) catch return false;
     }
     return true;
 }
@@ -274,36 +284,37 @@ fn linkNativeDependencies(
     bridge_include: std.Build.LazyPath,
     linux_opencv_bridge: ?std.Build.LazyPath,
 ) void {
+    const module = artifact.root_module;
     if (native_ffmpeg) {
-        if (ffmpeg_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
-        if (ffmpeg_lib) |path| artifact.addLibraryPath(.{ .cwd_relative = path });
-        artifact.linkSystemLibrary("avcodec");
-        artifact.linkSystemLibrary("avformat");
-        artifact.linkSystemLibrary("avutil");
-        artifact.linkSystemLibrary("swscale");
+        if (ffmpeg_include) |path| module.addIncludePath(.{ .cwd_relative = path });
+        if (ffmpeg_lib) |path| module.addLibraryPath(.{ .cwd_relative = path });
+        module.linkSystemLibrary("avcodec", .{});
+        module.linkSystemLibrary("avformat", .{});
+        module.linkSystemLibrary("avutil", .{});
+        module.linkSystemLibrary("swscale", .{});
     }
 
     if (native_opencv) {
-        if (opencv_include) |path| artifact.addIncludePath(.{ .cwd_relative = path });
-        artifact.addIncludePath(bridge_include);
+        if (opencv_include) |path| module.addIncludePath(.{ .cwd_relative = path });
+        module.addIncludePath(bridge_include);
         if (linux_opencv_bridge) |object| {
-            artifact.addObjectFile(object);
-            artifact.addObjectFile(.{
+            module.addObjectFile(object);
+            module.addObjectFile(.{
                 .cwd_relative = findCompilerLibrary(b, "libstdc++.so"),
             });
-            artifact.addObjectFile(.{
-                .cwd_relative = findCompilerLibrary(b, "libgcc_s.so"),
+            module.addObjectFile(.{
+                .cwd_relative = findCompilerLibrary(b, "libgcc_s.so.1"),
             });
         } else {
-            artifact.addCSourceFile(.{
+            module.addCSourceFile(.{
                 .file = opencv_bridge,
                 .flags = &.{ "-std=c++17", "-fexceptions" },
             });
-            artifact.linkLibCpp();
+            module.link_libcpp = true;
         }
 
         if (opencv_lib) |path| {
-            artifact.addLibraryPath(.{ .cwd_relative = path });
+            module.addLibraryPath(.{ .cwd_relative = path });
         }
         switch (target_os) {
             .windows => if (opencv_lib) |path| {
@@ -314,21 +325,21 @@ fn linkNativeDependencies(
                     "libopencv_video4130.dll.a",
                     "libopencv_calib3d4130.dll.a",
                 }) |library| {
-                    artifact.addObjectFile(.{
+                    module.addObjectFile(.{
                         .cwd_relative = b.pathJoin(&.{ path, library }),
                     });
                 }
             } else {
-                artifact.linkSystemLibrary("opencv_core4130");
-                artifact.linkSystemLibrary("opencv_imgproc4130");
-                artifact.linkSystemLibrary("opencv_video4130");
-                artifact.linkSystemLibrary("opencv_calib3d4130");
+                module.linkSystemLibrary("opencv_core4130", .{});
+                module.linkSystemLibrary("opencv_imgproc4130", .{});
+                module.linkSystemLibrary("opencv_video4130", .{});
+                module.linkSystemLibrary("opencv_calib3d4130", .{});
             },
             else => {
-                artifact.linkSystemLibrary("opencv_core");
-                artifact.linkSystemLibrary("opencv_imgproc");
-                artifact.linkSystemLibrary("opencv_video");
-                artifact.linkSystemLibrary("opencv_calib3d");
+                module.linkSystemLibrary("opencv_core", .{});
+                module.linkSystemLibrary("opencv_imgproc", .{});
+                module.linkSystemLibrary("opencv_video", .{});
+                module.linkSystemLibrary("opencv_calib3d", .{});
             },
         }
     }
@@ -350,7 +361,7 @@ fn configureLinuxRuntime(
             primary_path
     else
         primary_path;
-    const inherited = b.graph.env_map.get("LD_LIBRARY_PATH");
+    const inherited = b.graph.environ_map.get("LD_LIBRARY_PATH");
     run.setEnvironmentVariable(
         "LD_LIBRARY_PATH",
         if (inherited) |value|
@@ -361,7 +372,7 @@ fn configureLinuxRuntime(
 
     const flexiblas_path = b.pathJoin(&.{ primary_path, "flexiblas" });
     const flexiblas_backend = b.pathJoin(&.{ flexiblas_path, "libflexiblas_netlib.so" });
-    std.fs.accessAbsolute(flexiblas_backend, .{}) catch return;
+    std.Io.Dir.accessAbsolute(b.graph.io, flexiblas_backend, .{}) catch return;
     run.setEnvironmentVariable("FLEXIBLAS_LIBRARY_PATH", flexiblas_path);
     run.setEnvironmentVariable("FLEXIBLAS", flexiblas_backend);
 }
@@ -393,12 +404,11 @@ fn buildLinuxOpenCvBridge(
 fn findCompilerLibrary(b: *std.Build, library: []const u8) []const u8 {
     const compiler = b.findProgram(&.{ "c++", "g++", "clang++" }, &.{}) catch
         @panic("OpenCV on Linux requires a system C++ compiler; on Fedora install gcc-c++");
-    const result = std.process.Child.run(.{
-        .allocator = b.allocator,
+    const result = std.process.run(b.allocator, b.graph.io, .{
         .argv = &.{ compiler, b.fmt("-print-file-name={s}", .{library}) },
-        .env_map = &b.graph.env_map,
+        .environ_map = &b.graph.environ_map,
     }) catch @panic("could not locate libstdc++");
-    if (result.term != .Exited or result.term.Exited != 0) {
+    if (result.term != .exited or result.term.exited != 0) {
         @panic("could not locate libstdc++");
     }
     const path = std.mem.trim(u8, result.stdout, " \t\r\n");

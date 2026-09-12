@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 
 pub const MediaError = error{
     EmptyPath,
@@ -121,9 +122,9 @@ fn deriveAvailablePathWithSuffix(
 
 fn pathExists(path: []const u8) bool {
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.accessAbsolute(path, .{}) catch return false;
+        std.Io.Dir.accessAbsolute(sync.io(), path, .{}) catch return false;
     } else {
-        std.fs.cwd().access(path, .{}) catch return false;
+        std.Io.Dir.cwd().access(sync.io(), path, .{}) catch return false;
     }
     return true;
 }

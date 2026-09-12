@@ -373,24 +373,24 @@ const NativeDecoder = struct {
         );
         const frame_rate: ?types.Rational =
             if (guessed_rate.num > 0 and guessed_rate.den > 0)
-            .{
-                .numerator = guessed_rate.num,
-                .denominator = guessed_rate.den,
-            }
-        else
-            null;
+                .{
+                    .numerator = guessed_rate.num,
+                    .denominator = guessed_rate.den,
+                }
+            else
+                null;
         const duration_seconds: ?f64 =
             if (stream.*.duration != ffmpeg.AV_NOPTS_VALUE and
             stream.*.duration > 0)
-            @as(f64, @floatFromInt(stream.*.duration)) *
-                @as(f64, @floatFromInt(stream.*.time_base.num)) /
-                @as(f64, @floatFromInt(stream.*.time_base.den))
-        else if (format_context.duration != ffmpeg.AV_NOPTS_VALUE and
+                @as(f64, @floatFromInt(stream.*.duration)) *
+                    @as(f64, @floatFromInt(stream.*.time_base.num)) /
+                    @as(f64, @floatFromInt(stream.*.time_base.den))
+            else if (format_context.duration != ffmpeg.AV_NOPTS_VALUE and
             format_context.duration > 0)
-            @as(f64, @floatFromInt(format_context.duration)) /
-                @as(f64, ffmpeg.AV_TIME_BASE)
-        else
-            null;
+                @as(f64, @floatFromInt(format_context.duration)) /
+                    @as(f64, ffmpeg.AV_TIME_BASE)
+            else
+                null;
         const estimated_frame_count = estimateFrameCount(
             stream.*.nb_frames,
             frame_rate,

@@ -51,11 +51,11 @@ test "derives stabilized output beside source" {
 test "graphical output naming preserves previous exports" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    try temporary.dir.writeFile(.{
+    try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "take-stabilized.mp4",
         .data = "first",
     });
-    try temporary.dir.writeFile(.{
+    try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "take-stabilized-2.mp4",
         .data = "second",
     });
@@ -2302,7 +2302,7 @@ test "native encoder and muxer produce a playable MP4 container" {
             mux_result.audio_streams,
         );
     }
-    const stat = try std.fs.cwd().statFile(muxed_path);
+    const stat = try std.Io.Dir.cwd().statFile(std.testing.io, muxed_path, .{});
     try std.testing.expect(stat.size > 0);
 
     var cancellation_probe = MuxProgressProbe{ .cancel_on_progress = true };
@@ -2367,12 +2367,13 @@ test "native exporter completes the full transactional pipeline" {
             result.audio_streams,
         );
     }
-    const stat = try std.fs.cwd().statFile(output_path);
+    const stat = try std.Io.Dir.cwd().statFile(std.testing.io, output_path, .{});
     try std.testing.expect(stat.size > 0);
-    const diagnostics_contents = try std.fs.cwd().readFileAlloc(
-        std.testing.allocator,
+    const diagnostics_contents = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
         diagnostics_path,
-        1024 * 1024,
+        std.testing.allocator,
+        .limited(1024 * 1024),
     );
     defer std.testing.allocator.free(diagnostics_contents);
     try std.testing.expect(std.mem.startsWith(
@@ -2412,7 +2413,7 @@ test "native exporter bypasses stabilization without re-encoding video" {
             result.audio_streams,
         );
     }
-    const stat = try std.fs.cwd().statFile(output_path);
+    const stat = try std.Io.Dir.cwd().statFile(std.testing.io, output_path, .{});
     try std.testing.expect(stat.size > 0);
 }
 
@@ -2457,8 +2458,8 @@ const MuxProgressProbe = struct {
 
 fn deleteTestFile(path: []const u8) void {
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.deleteFileAbsolute(path) catch {};
+        std.Io.Dir.deleteFileAbsolute(std.testing.io, path) catch {};
     } else {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
     }
 }

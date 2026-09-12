@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const rl = @import("raylib");
 const media = @import("../core/media.zig");
 const decoder_mod = @import("../engine/decoder.zig");
@@ -9,7 +10,7 @@ const preview_thumbnails = @import("preview_thumbnails.zig");
 
 const bytes_per_pixel: usize = 4;
 const frame_queue_capacity = frame_queue.capacity;
-const preview_pipe_poll_interval = 100 * std.time.ns_per_ms;
+const preview_pipe_poll_interval = 100 * sync.ns_per_ms;
 const seek_debounce_seconds: f64 = 0.08;
 
 const PreviewPipe = enum { stdout };
@@ -56,8 +57,8 @@ pub const View = struct {
 
 pub const Player = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
-    queue_space_available: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    queue_space_available: sync.Condition = .{},
     thread: ?std.Thread = null,
     decoder_finished: bool = true,
     waiting_to_start_proxy: bool = false,
@@ -102,7 +103,7 @@ pub const Player = struct {
     pub fn init(allocator: std.mem.Allocator) Player {
         return .{
             .allocator = allocator,
-            .diagnostics_enabled = std.process.hasEnvVarConstant(
+            .diagnostics_enabled = sync.hasEnv(
                 "AXIA_PREVIEW_DIAGNOSTICS",
             ),
             .proxy = preview_proxy.Job.init(allocator),
@@ -129,12 +130,12 @@ pub const Player = struct {
         const display_dimensions = info.displayDimensions();
         const fps = info.framesPerSecond() orelse
             if (info.estimated_frame_count != null and
-            info.duration_seconds != null and
-            info.duration_seconds.? > 0)
-            @as(f64, @floatFromInt(info.estimated_frame_count.?)) /
-                info.duration_seconds.?
-        else
-            30;
+                info.duration_seconds != null and
+                info.duration_seconds.? > 0)
+                @as(f64, @floatFromInt(info.estimated_frame_count.?)) /
+                    info.duration_seconds.?
+            else
+                30;
         const profile = media.previewProfile(.{
             .width = display_dimensions.width,
             .height = display_dimensions.height,
@@ -177,9 +178,9 @@ pub const Player = struct {
         self.fps = media.fitPreviewFrameRateForProfile(fps, profile);
         self.duration_seconds = info.duration_seconds orelse
             if (info.estimated_frame_count) |count|
-            @as(f64, @floatFromInt(count)) / fps
-        else
-            return error.MissingMediaDuration;
+                @as(f64, @floatFromInt(count)) / fps
+            else
+                return error.MissingMediaDuration;
         self.position_seconds = 0;
         self.playback_clock_seconds = 0;
         self.decode_generation = 1;
@@ -243,7 +244,7 @@ pub const Player = struct {
             const selected_offset = frames_due - 1;
             const selected_index = (self.queue_read_index + selected_offset) %
                 frame_queue_capacity;
-            var upload_timer = std.time.Timer.start() catch null;
+            var upload_timer: ?sync.Timer = sync.Timer.start() catch null;
             rl.updateTexture(self.texture.?, self.framePixels(selected_index).ptr);
             if (upload_timer) |*timer| {
                 self.upload_ns +|= timer.read();
@@ -427,22 +428,19 @@ pub const Player = struct {
 
     fn readFrameInterruptibly(
         self: *Player,
-        poller: anytype,
+        reader: *std.Io.Reader,
         destination: []u8,
     ) !FrameReadResult {
-        // A bounded poll lets stopDecoder wake this thread before joining it,
-        // even when FFmpeg has not produced enough bytes for a complete frame.
         var offset: usize = 0;
         while (offset < destination.len) {
-            const fifo = poller.fifo(.stdout);
-            offset += fifo.read(destination[offset..]);
-            if (offset == destination.len) return .frame;
             if (self.cancellationRequested()) return .cancelled;
-
-            const pipe_open = try poller.pollTimeout(preview_pipe_poll_interval);
-            if (!pipe_open and poller.fifo(.stdout).count == 0) {
-                return if (offset == 0) .eof else error.EndOfStream;
-            }
+            const read = try sync.readWithTimeout(
+                reader,
+                destination[offset..],
+                preview_pipe_poll_interval,
+            ) orelse continue;
+            if (read == 0) return if (offset == 0) .eof else error.EndOfStream;
+            offset += read;
         }
         return .frame;
     }
@@ -559,12 +557,13 @@ pub const Player = struct {
             "pipe:1",
         };
 
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
-        child.expand_arg0 = .expand;
-        try child.spawn();
+        var child = try std.process.spawn(sync.io(), .{
+            .argv = &argv,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .inherit,
+            .expand_arg0 = .expand,
+        });
 
         var child_terminated = false;
         defer if (!child_terminated) {
@@ -573,9 +572,8 @@ pub const Player = struct {
 
         const stdout = child.stdout orelse return error.MissingPreviewPipe;
         const decode_result: FrameReadResult = decode: {
-            var poller = std.io.poll(self.allocator, PreviewPipe, .{ .stdout = stdout });
-            defer poller.deinit();
-            try poller.fifo(.stdout).ensureUnusedCapacity(self.frame_byte_count);
+            var read_buffer: [64 * 1024]u8 = undefined;
+            var file_reader = stdout.reader(sync.io(), &read_buffer);
             var decoded_index: u64 = 0;
 
             while (true) {
@@ -589,9 +587,9 @@ pub const Player = struct {
                 self.mutex.unlock();
                 if (cancelled) break :decode .cancelled;
 
-                var decode_timer = try std.time.Timer.start();
+                var decode_timer = try sync.Timer.start();
                 switch (try self.readFrameInterruptibly(
-                    &poller,
+                    &file_reader.interface,
                     self.framePixels(write_index),
                 )) {
                     .eof => break :decode .eof,
@@ -628,10 +626,10 @@ pub const Player = struct {
             return;
         }
 
-        const term = try child.wait();
+        const term = try child.wait(sync.io());
         child_terminated = true;
         const success = switch (term) {
-            .Exited => |code| code == 0,
+            .exited => |code| code == 0,
             else => false,
         };
 
@@ -855,5 +853,5 @@ fn averageMilliseconds(total_ns: u64, samples: u64) f64 {
     if (samples == 0) return 0;
     return @as(f64, @floatFromInt(total_ns)) /
         @as(f64, @floatFromInt(samples)) /
-        @as(f64, std.time.ns_per_ms);
+        @as(f64, sync.ns_per_ms);
 }
