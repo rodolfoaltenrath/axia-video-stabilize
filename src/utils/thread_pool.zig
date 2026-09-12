@@ -3,6 +3,22 @@ const state_mod = @import("../app_state.zig");
 const media = @import("../core/media.zig");
 const engine = @import("../engine/engine.zig");
 
+pub fn buildSessionOptions(
+    parameters: state_mod.Parameters,
+) !engine.session.Options {
+    const effect = parameters.stabilizationEffect();
+    if (!effect.enabled) {
+        // Until the general editor exporter replaces this legacy one-clip
+        // path, radius zero and zero crop produce identity corrections while
+        // preserving the existing encode/mux behavior.
+        return .{
+            .smoothing_radius_seconds = 0,
+            .crop = .{ .mode = .static, .extra_crop_fraction = 0 },
+        };
+    }
+    return engine.stabilization_effect.sessionOptions(effect);
+}
+
 const Job = union(enum) {
     stabilize: state_mod.JobConfig,
 };
@@ -91,21 +107,15 @@ pub const ThreadPool = struct {
         config: state_mod.JobConfig,
     ) !void {
         try engine.ensureReady();
-        if (config.parameters.mode == .distortion) {
-            return error.DistortionModeNotImplemented;
-        }
-
         self.state.update(.loading, 0.02);
         var progress = NativeProgress{ .state = self.state };
-        const normalized_smoothness =
-            std.math.clamp(config.parameters.smoothness, 0.0, 100.0) / 100.0;
-        const crop_fraction =
-            std.math.clamp(config.parameters.crop, 0.0, 30.0) / 100.0;
+        const session_options = try buildSessionOptions(config.parameters);
         const encoder_profile = config.parameters.export_quality.encoderProfile();
         var output_buffer: [state_mod.max_path_bytes]u8 = undefined;
-        const output_path = try media.deriveAvailableOutputPath(
+        const output_path = try media.deriveAvailableEditorOutputPath(
             &output_buffer,
             config.media.input(),
+            config.parameters.stabilization_enabled,
         );
         if (!self.state.setOutputPath(output_path)) {
             return error.OutputPathTooLong;
@@ -115,16 +125,8 @@ pub const ThreadPool = struct {
             config.media.input(),
             output_path,
             .{
-                .session = .{
-                    .smoothing_radius_seconds = normalized_smoothness * normalized_smoothness * 2.0,
-                    .crop = .{
-                        .mode = if (config.parameters.dynamic_crop)
-                            .dynamic
-                        else
-                            .static,
-                        .extra_crop_fraction = crop_fraction,
-                    },
-                },
+                .stabilization_enabled = config.parameters.stabilization_enabled,
+                .session = session_options,
                 .encoder = .{
                     .crf = encoder_profile.crf,
                     .preset = encoder_profile.preset,

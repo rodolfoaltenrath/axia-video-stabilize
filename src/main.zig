@@ -30,7 +30,7 @@ pub fn main() !void {
     var title_buffer: [128]u8 = undefined;
     const window_title = try std.fmt.bufPrintZ(
         &title_buffer,
-        "Axia {s} - Estabilização de Vídeo",
+        "Axia Editor {s}",
         .{build_options.version},
     );
     rl.initWindow(1280, 720, window_title);

@@ -24,7 +24,7 @@ if [[ -z "${fedora_version}" || "${fedora_version}" == "%fedora" ]]; then
     exit 1
 fi
 
-for command_name in zig ldd tar gzip sha256sum; do
+for command_name in ldd tar gzip sha256sum; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         echo "erro: o comando '${command_name}' é necessário para gerar o pacote" >&2
         exit 1
@@ -53,7 +53,7 @@ cd -- "${repo_dir}"
 temporary_dir=$(mktemp -d)
 trap 'rm -rf -- "${temporary_dir}"' EXIT
 build_prefix="${temporary_dir}/build"
-zig build --prefix "${build_prefix}" "${build_args[@]}"
+./zigw build --prefix "${build_prefix}" "${build_args[@]}"
 
 package_dir="${temporary_dir}/${package_name}"
 mkdir -p -- \

@@ -1,0 +1,43 @@
+#!/usr/bin/env sh
+set -eu
+
+required_version="0.13.0"
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ -n "${AXIA_ZIG:-}" ]; then
+    if [ ! -x "$AXIA_ZIG" ]; then
+        printf 'AXIA_ZIG não aponta para um executável: %s\n' "$AXIA_ZIG" >&2
+        exit 1
+    fi
+    actual_version=$($AXIA_ZIG version 2>/dev/null || true)
+    if [ "$actual_version" != "$required_version" ]; then
+        printf 'O Axia requer Zig %s; AXIA_ZIG usa %s.\n' \
+            "$required_version" "${actual_version:-versão desconhecida}" >&2
+        exit 1
+    fi
+    exec "$AXIA_ZIG" "$@"
+fi
+
+for candidate in \
+    "$project_dir/.tools/zig" \
+    "$project_dir/../axia-visualizer/.tools/zig-linux-x86_64-0.13.0/zig"
+do
+    if [ -x "$candidate" ] && [ "$($candidate version 2>/dev/null)" = "$required_version" ]; then
+        exec "$candidate" "$@"
+    fi
+done
+
+system_zig=$(command -v zig 2>/dev/null || true)
+if [ -n "$system_zig" ]; then
+    actual_version=$($system_zig version 2>/dev/null || true)
+    if [ "$actual_version" = "$required_version" ]; then
+        exec "$system_zig" "$@"
+    fi
+fi
+
+printf 'O Axia requer Zig %s, mas o Zig compatível não foi encontrado.\n' "$required_version" >&2
+printf 'Defina AXIA_ZIG=/caminho/para/zig-0.13.0 ou instale-o em .tools/zig.\n' >&2
+if [ -n "${actual_version:-}" ]; then
+    printf 'Versão encontrada no PATH: %s.\n' "$actual_version" >&2
+fi
+exit 1

@@ -11,9 +11,11 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "zigw",
         "native",
         "src",
         "scripts",
+        "docs",
         "README.md",
     },
 }

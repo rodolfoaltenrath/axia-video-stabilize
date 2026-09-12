@@ -1,5 +1,8 @@
 const std = @import("std");
+const editor_time = @import("../editor/time.zig");
+const effect_mod = @import("../effects/effect.zig");
 const decoder_mod = @import("decoder.zig");
+const frame_pipeline = @import("frame_pipeline.zig");
 const session_mod = @import("session.zig");
 const types = @import("types.zig");
 const warp = @import("warp.zig");
@@ -43,7 +46,27 @@ pub const RenderError = error{
     SinkFailed,
     SizeOverflow,
 } || decoder_mod.DecoderError || session_mod.SessionError ||
-    warp.WarpError || std.mem.Allocator.Error;
+    frame_pipeline.Error || warp.WarpError || std.mem.Allocator.Error;
+
+const CompatibilityPrepared = struct {
+    analysis: *const session_mod.Analysis,
+
+    fn stabilizationMatrix(
+        raw_context: ?*anyopaque,
+        lookup: frame_pipeline.StabilizationLookup,
+    ) frame_pipeline.PreparedError!warp.AffineMatrix {
+        const self: *CompatibilityPrepared = @ptrCast(@alignCast(raw_context.?));
+        const frame_index = lookup.frame_index orelse
+            return error.InvalidPreparedEffect;
+        if (lookup.width != self.analysis.video_info.source.width or
+            lookup.height != self.analysis.video_info.source.height)
+        {
+            return error.InvalidPreparedEffect;
+        }
+        return self.analysis.renderMatrix(frame_index) catch
+            return error.InvalidPreparedEffect;
+    }
+};
 
 pub const Renderer = if (native_enabled) NativeRenderer else DisabledRenderer;
 
@@ -98,6 +121,10 @@ const NativeRenderer = struct {
         defer allocator.free(output_pixels);
 
         var rendered_count: usize = 0;
+        const compatibility_effects = [_]effect_mod.Effect{
+            .{ .stabilization = .{} },
+        };
+        var prepared = CompatibilityPrepared{ .analysis = analysis };
         while (try decoder.readFrame()) |frame| {
             if (observer.isCancelled()) return error.Cancelled;
             if (rendered_count >= analysis.records.len) {
@@ -116,15 +143,28 @@ const NativeRenderer = struct {
             {
                 return error.TimingMismatch;
             }
-            const matrix = try analysis.renderMatrix(rendered_count);
-            try warp.warpBgra(
+            const source_time = try editor_time.Time.fromUnits(
+                frame.timing.pts,
+                frame.timing.time_base.numerator,
+                frame.timing.time_base.denominator,
+            );
+            try frame_pipeline.processBgra(
                 frame.pixels,
                 frame.stride,
                 output_pixels,
                 stride,
-                frame.width,
-                frame.height,
-                matrix,
+                .{
+                    .clip_id = 0,
+                    .source_time = source_time,
+                    .frame_index = rendered_count,
+                    .width = frame.width,
+                    .height = frame.height,
+                },
+                &compatibility_effects,
+                .{
+                    .context = &prepared,
+                    .stabilization_matrix = CompatibilityPrepared.stabilizationMatrix,
+                },
             );
             if (!observer.submit(.{
                 .timing = frame.timing,

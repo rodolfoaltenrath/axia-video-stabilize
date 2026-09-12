@@ -13,13 +13,20 @@ per-scene static or dynamic crop plan, decodes full-resolution BGRA frames,
 warps them through reusable buffers, encodes H.264 and remuxes the source audio
 and metadata into a transactionally published MP4.
 
+The first editor foundation now lives in `src/editor` and `src/effects`. It
+adds rational timeline time, non-destructive clips and a typed stabilization
+effect while preserving the current application and CLI. See
+[`docs/EDITOR_ROADMAP.md`](docs/EDITOR_ROADMAP.md) for the migration milestones.
+The desktop workspace presents the imported video as a selected timeline clip
+and exposes stabilization through its effect inspector.
+
 PQ/HDR10 and HLG inputs are converted from BT.2020 to SDR BT.709 through a
 16-bit, highlight-preserving tone-mapping path before stabilization and H.264
 encoding. SDR inputs retain their original color metadata.
 
 ## Requirements
 
-- Zig 0.13.0
+- Zig 0.13.0 (the project is not yet compatible with Zig 0.16)
 - FFmpeg development libraries, including avcodec, avformat, avutil and swscale
 - OpenCV development libraries used by the small bridge in `native/`
 - The `ffmpeg` executable on `PATH` for the graphical video preview,
@@ -30,6 +37,18 @@ encoding. SDR inputs retain their original color metadata.
   for the graphical video file selector
 - Windows 10/11 or Linux with the usual X11/OpenGL development packages
 
+On Fedora with RPM Fusion FFmpeg installed, prepare a development machine with:
+
+```text
+sudo dnf install gcc-c++ ffmpeg-devel opencv-devel \
+  libX11-devel libXcursor-devel libXext-devel libXfixes-devel \
+  libXi-devel libXinerama-devel libXrandr-devel libXrender-devel \
+  mesa-libGL-devel
+```
+
+Use `ffmpeg-free-devel` in place of `ffmpeg-devel` only when the system uses
+Fedora's `ffmpeg-free` packages instead of RPM Fusion FFmpeg.
+
 Raylib 5.5 is downloaded and compiled by Zig. It creates the OpenGL 3.3 window
 and keeps the repository independent from a global GUI installation.
 Montserrat Regular and SemiBold are embedded in the executable. Their OFL 1.1
@@ -38,17 +57,21 @@ license is included in `src/assets/fonts/OFL.txt`.
 ## Build and run
 
 ```text
-zig build run
-zig build -Doptimize=ReleaseFast
-zig build test
+./zigw build run
+./zigw build -Doptimize=ReleaseFast
+./zigw build test
 ```
 
 The current release candidate version is read from `build.zig.zon` and embedded
 in both executables. Check it without starting the graphical application:
 
 ```text
-zig build cli -- --version
+./zigw build cli -- --version
 ```
+
+`zigw` selects Zig 0.13.0 without replacing a newer system Zig. It checks
+`AXIA_ZIG`, `.tools/zig`, the adjacent development toolchain and finally
+`PATH`, and reports a clear version error when none is compatible.
 
 When custom native library directories are supplied, the `run`, `cli` and
 `test` build steps configure their runtime environment automatically. Use
@@ -95,15 +118,29 @@ You can also drag one video directly onto the application window or open it as
 the graphical executable's only argument. During development:
 
 ```text
-zig build run -- /path/to/input.mp4
+./zigw build run -- /path/to/input.mp4
 ```
 
 The workspace includes a real video preview with compact play/pause, ±5-second
 skip controls, space-bar control and a seek bar below the image. FFmpeg streams
-at most 960x540 and 30 fps with one RGBA frame ahead into a proportional Raylib
-texture, respecting display rotation while keeping memory bounded regardless
-of the source duration. Preview throttling does not change the export frame
-rate.
+one RGBA frame ahead into a proportional Raylib texture, respecting display
+rotation while keeping memory bounded regardless of the source duration.
+Sources with a high decoding cost use an orientation-aware 960x540 landscape
+or 540x960 portrait preview at 24 fps. The decision considers resolution,
+frame rate, encoded bitrate and HDR rather
+than resolution alone. Lighter sources remain capped at 960x540 and 30 fps.
+For demanding sources, Axia keeps the first decoded frame as a poster and
+builds a video-only H.264 proxy in the user's cache. HDR proxies are tone
+mapped to SDR BT.709. The monitor switches to the proxy automatically when it
+is ready, and later imports reuse the cached file. Proxy creation never changes
+the project source used by stabilization or export.
+Decoding uses FFmpeg's automatic codec threading and attempts available
+hardware acceleration with a transparent software fallback. Preview resolution
+and throttling never change analysis or export, which continue to consume the
+original media.
+
+Set `AXIA_PREVIEW_DIAGNOSTICS=1` when launching the graphical application to
+show preview pipeline and GPU-upload timing in the monitor.
 
 The graphical workspace offers three H.264 export-quality profiles: **Alta**
 prioritizes image quality, **Padrão** keeps the engine defaults and **Leve**
@@ -113,11 +150,15 @@ muxing, and reports measured frames per second with an ETA when enough samples
 are available. The application opens maximized to match the monitor's available
 workspace and remains resizable through the native window controls.
 
+Stabilization can be disabled in the clip inspector. In that mode Axia skips
+motion analysis and video re-encoding, remuxes the original video losslessly
+to an `-export.mp4` output and preserves compatible audio and metadata.
+
 FFmpeg and OpenCV are enabled by default when installed in standard system
 locations:
 
 ```text
-zig build run
+./zigw build run
 ```
 
 On Fedora, the build also discovers dependency bundles stored under
@@ -136,13 +177,13 @@ zig build run \
 The same pipeline is also available without the graphical window:
 
 ```text
-zig build cli -- input.mp4 output.mp4
+./zigw build cli -- input.mp4 output.mp4
 ```
 
 To generate a frame-by-frame diagnostic report alongside the export:
 
 ```text
-zig build cli -- input.mp4 output.mp4 --diagnostics diagnostics.csv
+./zigw build cli -- input.mp4 output.mp4 --diagnostics diagnostics.csv
 ```
 
 The CSV includes tracking confidence, detected/tracked/inlier point counts,

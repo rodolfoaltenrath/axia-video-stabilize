@@ -1,5 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const editor_time = @import("../editor/time.zig");
 const types = @import("types.zig");
 
 const ffmpeg = if (build_options.native_ffmpeg) @cImport({
@@ -28,7 +29,9 @@ pub const DecoderError = error{
     MissingTimestamp,
     UnsupportedResolutionChange,
     ConversionFailed,
-} || std.mem.Allocator.Error;
+    InvalidSeekTime,
+    SeekFailed,
+} || editor_time.Error || std.mem.Allocator.Error;
 
 pub const Options = struct {
     max_analysis_dimension: u32 = 960,
@@ -83,6 +86,8 @@ pub const VideoInfo = struct {
     frame_rate: ?types.Rational,
     duration_seconds: ?f64,
     estimated_frame_count: ?u64,
+    bit_rate: ?u64 = null,
+    source_is_hdr: bool = false,
 
     pub fn framesPerSecond(self: VideoInfo) ?f64 {
         const rate = self.frame_rate orelse return null;
@@ -199,6 +204,21 @@ const DisabledDecoder = struct {
 
     pub fn readFrame(self: *DisabledDecoder) DecoderError!?FrameView {
         _ = self;
+        return error.BackendNotEnabled;
+    }
+
+    pub fn seekTo(self: *DisabledDecoder, target: editor_time.Time) DecoderError!void {
+        _ = self;
+        _ = target;
+        return error.BackendNotEnabled;
+    }
+
+    pub fn readFrameAtOrAfter(
+        self: *DisabledDecoder,
+        target: editor_time.Time,
+    ) DecoderError!?FrameView {
+        _ = self;
+        _ = target;
         return error.BackendNotEnabled;
     }
 };
@@ -376,6 +396,12 @@ const NativeDecoder = struct {
             frame_rate,
             duration_seconds,
         );
+        const bit_rate: ?u64 = if (codec_context.bit_rate > 0)
+            @intCast(codec_context.bit_rate)
+        else if (format_context.bit_rate > 0)
+            @intCast(format_context.bit_rate)
+        else
+            null;
         const source_color = ColorInfo{
             .range = @intCast(codec_context.color_range),
             .primaries = @intCast(codec_context.color_primaries),
@@ -403,6 +429,8 @@ const NativeDecoder = struct {
                 .frame_rate = frame_rate,
                 .duration_seconds = duration_seconds,
                 .estimated_frame_count = estimated_frame_count,
+                .bit_rate = bit_rate,
+                .source_is_hdr = hdrTransfer(source_color.transfer) != null,
             },
             .output_dimensions = output_dimensions,
             .output_format = options.output_format,
@@ -479,6 +507,53 @@ const NativeDecoder = struct {
                 break;
             }
         }
+    }
+
+    /// Seeks to the keyframe at or before `target`. The next decoded frame may
+    /// precede the target; use `readFrameAtOrAfter` when that distinction
+    /// matters. Frame indices restart at zero after every seek.
+    pub fn seekTo(
+        self: *NativeDecoder,
+        target: editor_time.Time,
+    ) DecoderError!void {
+        if (target.ticks < 0) return error.InvalidSeekTime;
+        const timestamp = try target.toUnits(
+            self.info.time_base.numerator,
+            self.info.time_base.denominator,
+            .floor,
+        );
+        if (ffmpeg.av_seek_frame(
+            self.format_context,
+            self.video_stream_index,
+            timestamp,
+            ffmpeg.AVSEEK_FLAG_BACKWARD,
+        ) < 0) {
+            return error.SeekFailed;
+        }
+        ffmpeg.avcodec_flush_buffers(self.codec_context);
+        ffmpeg.av_packet_unref(self.packet);
+        ffmpeg.av_frame_unref(self.frame);
+        self.next_index = 0;
+        self.draining = false;
+        self.finished = false;
+    }
+
+    /// Returns the first presentation frame whose PTS is equal to or later
+    /// than `target`, which also works for variable-frame-rate sources.
+    pub fn readFrameAtOrAfter(
+        self: *NativeDecoder,
+        target: editor_time.Time,
+    ) DecoderError!?FrameView {
+        try self.seekTo(target);
+        while (try self.readFrame()) |frame| {
+            const frame_time = try editor_time.Time.fromUnits(
+                frame.timing.pts,
+                frame.timing.time_base.numerator,
+                frame.timing.time_base.denominator,
+            );
+            if (frame_time.compare(target) != .lt) return frame;
+        }
+        return null;
     }
 
     fn convertCurrentFrame(self: *NativeDecoder) DecoderError!FrameView {
@@ -974,4 +1049,35 @@ test "swscale matrix follows metadata and resolution fallback" {
         @as(c_int, ffmpeg.SWS_CS_DEFAULT),
         swsMatrix(2, .{ .width = 640, .height = 480 }),
     );
+}
+
+test "native decoder seeks to the first frame at or after a rational time" {
+    if (!native_enabled or build_options.test_video.len == 0) {
+        return error.SkipZigTest;
+    }
+    var decoder = try Decoder.open(
+        std.testing.allocator,
+        build_options.test_video,
+        .{ .output_format = .gray8 },
+    );
+    defer decoder.deinit();
+
+    var target: ?editor_time.Time = null;
+    for (0..10) |_| {
+        const frame = (try decoder.readFrame()) orelse break;
+        target = try editor_time.Time.fromUnits(
+            frame.timing.pts,
+            frame.timing.time_base.numerator,
+            frame.timing.time_base.denominator,
+        );
+    }
+    const requested = target orelse return error.SkipZigTest;
+    const selected = (try decoder.readFrameAtOrAfter(requested)) orelse
+        return error.TestUnexpectedResult;
+    const selected_time = try editor_time.Time.fromUnits(
+        selected.timing.pts,
+        selected.timing.time_base.numerator,
+        selected.timing.time_base.denominator,
+    );
+    try std.testing.expect(selected_time.compare(requested) != .lt);
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const stabilization_effect = @import("effects/stabilization.zig");
 
 pub const Phase = enum {
     idle,
@@ -58,11 +59,25 @@ pub const ExportQuality = enum {
 };
 
 pub const Parameters = struct {
+    stabilization_enabled: bool = true,
     smoothness: f32 = 72.0,
     crop: f32 = 12.0,
     dynamic_crop: bool = true,
     mode: StabilizationMode = .motion,
     export_quality: ExportQuality = .balanced,
+
+    pub fn stabilizationEffect(self: Parameters) stabilization_effect.Stabilization {
+        return .{
+            .enabled = self.stabilization_enabled,
+            .smoothness_percent = self.smoothness,
+            .extra_crop_percent = self.crop,
+            .dynamic_crop = self.dynamic_crop,
+            .mode = switch (self.mode) {
+                .motion => .motion,
+                .distortion => .distortion,
+            },
+        };
+    }
 };
 
 pub const max_path_bytes = 2048;

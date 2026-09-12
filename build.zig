@@ -373,7 +373,7 @@ fn buildLinuxOpenCvBridge(
     opencv_include: ?[]const u8,
 ) std.Build.LazyPath {
     const compiler = b.findProgram(&.{ "c++", "g++", "clang++" }, &.{}) catch
-        @panic("OpenCV on Linux requires a system C++ compiler");
+        @panic("OpenCV on Linux requires a system C++ compiler; on Fedora install gcc-c++");
     const command = b.addSystemCommand(&.{
         compiler,
         "-c",
@@ -392,7 +392,7 @@ fn buildLinuxOpenCvBridge(
 
 fn findCompilerLibrary(b: *std.Build, library: []const u8) []const u8 {
     const compiler = b.findProgram(&.{ "c++", "g++", "clang++" }, &.{}) catch
-        @panic("OpenCV on Linux requires a system C++ compiler");
+        @panic("OpenCV on Linux requires a system C++ compiler; on Fedora install gcc-c++");
     const result = std.process.Child.run(.{
         .allocator = b.allocator,
         .argv = &.{ compiler, b.fmt("-print-file-name={s}", .{library}) },

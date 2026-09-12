@@ -73,7 +73,7 @@ pub fn button(rect: rl.Rectangle, label: [:0]const u8, style: ButtonStyle, enabl
     return hovered and rl.isMouseButtonPressed(.left);
 }
 
-pub fn slider(rect: rl.Rectangle, label: [:0]const u8, value: *f32, minimum: f32, maximum: f32, suffix: [:0]const u8) bool {
+pub fn slider(rect: rl.Rectangle, label: [:0]const u8, value: *f32, minimum: f32, maximum: f32, suffix: [:0]const u8, enabled: bool) bool {
     var changed = false;
     const mouse = rl.getMousePosition();
     const hitbox = rl.Rectangle{
@@ -82,30 +82,30 @@ pub fn slider(rect: rl.Rectangle, label: [:0]const u8, value: *f32, minimum: f32
         .width = rect.width,
         .height = 26,
     };
-    const hovered = rl.checkCollisionPointRec(mouse, hitbox);
+    const hovered = enabled and rl.checkCollisionPointRec(mouse, hitbox);
     if (rl.isMouseButtonDown(.left) and hovered) {
         const normalized = std.math.clamp((mouse.x - rect.x) / rect.width, 0.0, 1.0);
         value.* = minimum + normalized * (maximum - minimum);
         changed = true;
     }
 
-    text(label, rect.x, rect.y, 14, theme.text_muted);
+    text(label, rect.x, rect.y, 14, if (enabled) theme.text_muted else theme.text_subtle);
     var buffer: [48]u8 = undefined;
     const value_text = std.fmt.bufPrintZ(&buffer, "{d:.0}{s}", .{ value.*, suffix }) catch "--";
     const measured = fonts.measure(value_text, 14, .semibold);
-    textStrong(value_text, rect.x + rect.width - measured.x, rect.y, 14, theme.text);
+    textStrong(value_text, rect.x + rect.width - measured.x, rect.y, 14, if (enabled) theme.text else theme.text_subtle);
 
     const track = rl.Rectangle{ .x = rect.x, .y = rect.y + 31, .width = rect.width, .height = 5 };
     rl.drawRectangleRounded(track, 1.0, 6, if (hovered) theme.surface_hover else theme.border);
     const normalized = std.math.clamp((value.* - minimum) / (maximum - minimum), 0.0, 1.0);
     rl.drawRectangleRounded(.{ .x = track.x, .y = track.y, .width = track.width * normalized, .height = track.height }, 1.0, 6, theme.accent);
     const thumb = rl.Vector2{ .x = track.x + track.width * normalized, .y = track.y + track.height * 0.5 };
-    rl.drawCircleV(thumb, if (hovered) 9 else 8, theme.text);
-    rl.drawCircleV(thumb, if (hovered) 5 else 4, theme.accent);
+    rl.drawCircleV(thumb, if (hovered) 9 else 8, if (enabled) theme.text else theme.text_subtle);
+    rl.drawCircleV(thumb, if (hovered) 5 else 4, if (enabled) theme.accent else theme.border);
     return changed;
 }
 
-pub fn toggle(x: f32, y: f32, label: [:0]const u8, value: *bool) bool {
+pub fn toggle(x: f32, y: f32, label: [:0]const u8, value: *bool, enabled: bool) bool {
     const rect = rl.Rectangle{ .x = x, .y = y, .width = 38, .height = 20 };
     const mouse = rl.getMousePosition();
     const label_size = fonts.measure(label, 14, .regular);
@@ -115,7 +115,7 @@ pub fn toggle(x: f32, y: f32, label: [:0]const u8, value: *bool) bool {
         .width = 54 + label_size.x,
         .height = 26,
     };
-    const hovered = rl.checkCollisionPointRec(mouse, hitbox);
+    const hovered = enabled and rl.checkCollisionPointRec(mouse, hitbox);
     var changed = false;
     if (hovered and rl.isMouseButtonPressed(.left)) {
         value.* = !value.*;
@@ -125,7 +125,9 @@ pub fn toggle(x: f32, y: f32, label: [:0]const u8, value: *bool) bool {
         rect,
         1.0,
         12,
-        if (value.*)
+        if (!enabled)
+            theme.surface_alt
+        else if (value.*)
             (if (hovered) theme.accent_hover else theme.accent)
         else if (hovered)
             theme.surface_hover
@@ -133,9 +135,36 @@ pub fn toggle(x: f32, y: f32, label: [:0]const u8, value: *bool) bool {
             theme.border,
     );
     if (!value.*) rl.drawRectangleRoundedLinesEx(rect, 1.0, 12, 1, theme.border);
-    rl.drawCircleV(.{ .x = if (value.*) x + 28 else x + 10, .y = y + 10 }, 7, theme.text);
-    text(label, x + 50, y + 2, 14, if (hovered) theme.text else theme.text_muted);
+    rl.drawCircleV(.{ .x = if (value.*) x + 28 else x + 10, .y = y + 10 }, 7, if (enabled) theme.text else theme.text_subtle);
+    text(label, x + 50, y + 2, 14, if (!enabled) theme.text_subtle else if (hovered) theme.text else theme.text_muted);
     return changed;
+}
+
+pub fn checkbox(x: f32, y: f32, label: [:0]const u8, value: *bool) bool {
+    const box = rl.Rectangle{ .x = x, .y = y, .width = 18, .height = 18 };
+    const label_size = fonts.measure(label, 11, .semibold);
+    const hitbox = rl.Rectangle{
+        .x = x - 3,
+        .y = y - 3,
+        .width = box.width + 8 + label_size.x + 6,
+        .height = 24,
+    };
+    const hovered = rl.checkCollisionPointRec(rl.getMousePosition(), hitbox);
+    if (hovered and rl.isMouseButtonPressed(.left)) value.* = !value.*;
+
+    rl.drawRectangleRounded(
+        box,
+        0.22,
+        5,
+        if (value.*) theme.accent else if (hovered) theme.surface_hover else theme.surface_alt,
+    );
+    rl.drawRectangleRoundedLinesEx(box, 0.22, 5, 1, if (value.*) theme.accent_hover else theme.border);
+    if (value.*) {
+        rl.drawLineEx(.{ .x = x + 4, .y = y + 9 }, .{ .x = x + 8, .y = y + 13 }, 2, theme.text);
+        rl.drawLineEx(.{ .x = x + 8, .y = y + 13 }, .{ .x = x + 15, .y = y + 5 }, 2, theme.text);
+    }
+    textStrong(label, x + 25, y + 4, 11, if (hovered) theme.text else theme.text_muted);
+    return hovered and rl.isMouseButtonPressed(.left);
 }
 
 pub fn progressBar(rect: rl.Rectangle, progress: f32) void {

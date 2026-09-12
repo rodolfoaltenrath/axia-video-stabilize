@@ -4,24 +4,42 @@ const app_state = @import("app_state.zig");
 const media = @import("core/media.zig");
 const file_dialog = @import("platform/file_dialog.zig");
 const ffmpeg_command = @import("platform/ffmpeg_command.zig");
+const preview_proxy = @import("ui/preview_proxy.zig");
+const preview_frame_queue = @import("ui/frame_queue.zig");
+const preview_thumbnails = @import("ui/preview_thumbnails.zig");
+const thread_pool = @import("utils/thread_pool.zig");
 const engine = @import("engine/engine.zig");
+const editor = @import("editor/editor.zig");
 const analyzer = engine.analyzer;
 const crop = engine.crop;
 const decoder = engine.decoder;
 const encoder = engine.encoder;
 const exporter = engine.exporter;
+const frame_pipeline = engine.frame_pipeline;
 const features = engine.features;
 const engine_types = engine.types;
 const motion = engine.motion;
 const muxer = engine.muxer;
 const renderer = engine.renderer;
+const project_decoder = engine.project_decoder;
+const project_renderer = engine.project_renderer;
 const session = engine.session;
+const stabilization_effect = engine.stabilization_effect;
 const trajectory = engine.trajectory;
 const warp = engine.warp;
 
 comptime {
+    _ = editor;
     _ = file_dialog;
+    _ = frame_pipeline;
     _ = ffmpeg_command;
+    _ = preview_proxy;
+    _ = preview_frame_queue;
+    _ = preview_thumbnails;
+    _ = stabilization_effect;
+    _ = project_decoder;
+    _ = project_renderer;
+    _ = thread_pool;
 }
 
 test "derives stabilized output beside source" {
@@ -93,6 +111,16 @@ test "rejects unsupported media extension" {
     );
 }
 
+test "editor output name reflects optional stabilization" {
+    var buffer: [256]u8 = undefined;
+    const output = try media.deriveAvailableEditorOutputPath(
+        &buffer,
+        "/video/take.mov",
+        false,
+    );
+    try std.testing.expectEqualStrings("/video/take-export.mp4", output);
+}
+
 test "preview size is bounded without upscaling" {
     const full_hd = media.fitPreviewSize(1920, 1080, 960, 540);
     try std.testing.expectEqual(@as(u32, 960), full_hd.width);
@@ -105,6 +133,24 @@ test "preview size is bounded without upscaling" {
     const small = media.fitPreviewSize(640, 360, 960, 540);
     try std.testing.expectEqual(@as(u32, 640), small.width);
     try std.testing.expectEqual(@as(u32, 360), small.height);
+}
+
+test "oriented preview gives portrait and landscape equivalent detail" {
+    const landscape = media.fitOrientedPreviewSize(3840, 2160, 960, 540);
+    try std.testing.expectEqual(@as(u32, 960), landscape.width);
+    try std.testing.expectEqual(@as(u32, 540), landscape.height);
+
+    const portrait = media.fitOrientedPreviewSize(2160, 3840, 960, 540);
+    try std.testing.expectEqual(@as(u32, 540), portrait.width);
+    try std.testing.expectEqual(@as(u32, 960), portrait.height);
+
+    const small_portrait = media.fitOrientedPreviewSize(360, 640, 960, 540);
+    try std.testing.expectEqual(@as(u32, 360), small_portrait.width);
+    try std.testing.expectEqual(@as(u32, 640), small_portrait.height);
+
+    const square = media.fitOrientedPreviewSize(1200, 1200, 960, 540);
+    try std.testing.expectEqual(@as(u32, 540), square.width);
+    try std.testing.expectEqual(@as(u32, 540), square.height);
 }
 
 test "preview frame rate is capped independently from export" {
@@ -120,6 +166,56 @@ test "preview frame rate is capped independently from export" {
         @as(f64, 30),
         media.fitPreviewFrameRate(std.math.nan(f64)),
     );
+}
+
+test "demanding media receives a lighter preview profile" {
+    const four_k = media.previewProfile(.{
+        .width = 3840,
+        .height = 2160,
+        .frames_per_second = 24,
+    });
+    try std.testing.expectEqual(@as(u32, 960), four_k.maximum_long_edge);
+    try std.testing.expectEqual(@as(u32, 540), four_k.maximum_short_edge);
+    try std.testing.expect(four_k.proxy_recommended);
+    try std.testing.expectEqual(
+        @as(f64, 24),
+        media.fitPreviewFrameRateForProfile(60, four_k),
+    );
+
+    const full_hd = media.previewProfile(.{
+        .width = 1920,
+        .height = 1080,
+        .frames_per_second = 30,
+    });
+    try std.testing.expectEqual(@as(u32, 960), full_hd.maximum_long_edge);
+    try std.testing.expect(!full_hd.proxy_recommended);
+    try std.testing.expectEqual(
+        @as(f64, 30),
+        media.fitPreviewFrameRateForProfile(60, full_hd),
+    );
+
+    const high_frame_rate = media.previewProfile(.{
+        .width = 1920,
+        .height = 1080,
+        .frames_per_second = 60,
+    });
+    try std.testing.expectEqual(@as(f64, 24), high_frame_rate.maximum_fps);
+
+    const high_bit_rate = media.previewProfile(.{
+        .width = 1920,
+        .height = 1080,
+        .frames_per_second = 30,
+        .bit_rate = 100_000_000,
+    });
+    try std.testing.expectEqual(@as(u32, 960), high_bit_rate.maximum_long_edge);
+
+    const hdr = media.previewProfile(.{
+        .width = 1920,
+        .height = 1080,
+        .frames_per_second = 24,
+        .hdr = true,
+    });
+    try std.testing.expectEqual(@as(u32, 540), hdr.maximum_short_edge);
 }
 
 test "processing job freezes media and parameters" {
@@ -162,6 +258,56 @@ test "export quality presets map to encoder settings" {
     try std.testing.expectEqualStrings("medium", balanced.preset);
     try std.testing.expectEqual(@as(u8, 24), compact.crf);
     try std.testing.expectEqualStrings("fast", compact.preset);
+}
+
+test "application parameters produce a modular stabilization effect" {
+    const parameters = app_state.Parameters{
+        .smoothness = 64,
+        .crop = 8,
+        .dynamic_crop = false,
+        .mode = .motion,
+    };
+    const effect = parameters.stabilizationEffect();
+    try std.testing.expect(effect.enabled);
+    try std.testing.expectEqual(@as(f32, 64), effect.smoothness_percent);
+    try std.testing.expectEqual(@as(f32, 8), effect.extra_crop_percent);
+    try std.testing.expect(!effect.dynamic_crop);
+    try std.testing.expectEqual(
+        @import("effects/stabilization.zig").Mode.motion,
+        effect.mode,
+    );
+}
+
+test "disabled stabilization maps to identity session options" {
+    const options = try thread_pool.buildSessionOptions(.{
+        .stabilization_enabled = false,
+        .smoothness = 100,
+        .crop = 30,
+        .dynamic_crop = true,
+        .mode = .distortion,
+    });
+    try std.testing.expectEqual(@as(f64, 0), options.smoothing_radius_seconds);
+    try std.testing.expectEqual(engine.crop.Mode.static, options.crop.mode);
+    try std.testing.expectEqual(@as(f64, 0), options.crop.extra_crop_fraction);
+}
+
+test "processing worker consumes stabilization through effect adapter" {
+    const options = try thread_pool.buildSessionOptions(.{
+        .smoothness = 50,
+        .crop = 10,
+        .dynamic_crop = false,
+    });
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 0.5),
+        options.smoothing_radius_seconds,
+        0.000001,
+    );
+    try std.testing.expectEqual(engine.crop.Mode.static, options.crop.mode);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 0.1),
+        options.crop.extra_crop_fraction,
+        0.000001,
+    );
 }
 
 test "muxing remains an active cancellable phase" {
@@ -2238,6 +2384,36 @@ test "native exporter completes the full transactional pipeline" {
         result.frames + 1,
         std.mem.count(u8, diagnostics_contents, "\n"),
     );
+}
+
+test "native exporter bypasses stabilization without re-encoding video" {
+    if (!exporter.native_enabled) return error.SkipZigTest;
+    if (build_options.test_video.len == 0) return error.SkipZigTest;
+
+    const output_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}.axia-bypass-test.mp4",
+        .{build_options.test_video},
+    );
+    defer std.testing.allocator.free(output_path);
+    defer deleteTestFile(output_path);
+    deleteTestFile(output_path);
+
+    const result = try exporter.Exporter.run(
+        std.testing.allocator,
+        build_options.test_video,
+        output_path,
+        .{ .stabilization_enabled = false },
+    );
+    try std.testing.expectEqual(@as(u64, 0), result.frames);
+    if (build_options.test_video_audio_streams > 0) {
+        try std.testing.expectEqual(
+            build_options.test_video_audio_streams,
+            result.audio_streams,
+        );
+    }
+    const stat = try std.fs.cwd().statFile(output_path);
+    try std.testing.expect(stat.size > 0);
 }
 
 const RenderCounter = struct {

@@ -48,6 +48,19 @@ pub fn bundledFilename() []const u8 {
     return if (builtin.os.tag == .windows) "ffmpeg.exe" else "ffmpeg";
 }
 
+/// Stops and reaps an FFmpeg child without waiting indefinitely for a graceful
+/// shutdown. FFmpeg can ignore SIGTERM while blocked writing to a full pipe,
+/// which would make std.process.Child.kill() wait forever on POSIX systems.
+pub fn terminate(child: *std.process.Child) void {
+    if (builtin.os.tag == .windows) {
+        _ = child.kill() catch {};
+        return;
+    }
+
+    std.posix.kill(child.id, std.posix.SIG.KILL) catch {};
+    _ = child.wait() catch {};
+}
+
 fn defaultCommand() []const u8 {
     return "ffmpeg";
 }

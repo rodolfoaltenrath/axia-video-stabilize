@@ -40,6 +40,7 @@ pub const Observer = struct {
 };
 
 pub const Options = struct {
+    stabilization_enabled: bool = true,
     session: session_mod.Options = .{},
     encoder: encoder_mod.Options = .{},
     muxer: muxer.Options = .{},
@@ -99,6 +100,15 @@ const NativeExporter = struct {
             }
         }
         if (options.observer.isCancelled()) return error.Cancelled;
+
+        if (!options.stabilization_enabled) {
+            return remuxOriginal(
+                allocator,
+                input_path,
+                output_path,
+                options,
+            );
+        }
 
         const video_temp_path = try temporaryPath(
             allocator,
@@ -219,6 +229,49 @@ const NativeExporter = struct {
         };
     }
 };
+
+fn remuxOriginal(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    output_path: []const u8,
+    options: Options,
+) ExportError!Result {
+    const partial_path = try temporaryPath(
+        allocator,
+        output_path,
+        "partial",
+    );
+    defer allocator.free(partial_path);
+    var published = false;
+    defer if (!published) deleteFile(partial_path);
+
+    options.observer.report(.{
+        .stage = .muxing,
+        .stage_progress = 0,
+    });
+    var mux_observer = MuxObserver{ .observer = options.observer };
+    var mux_options = options.muxer;
+    mux_options.observer = .{
+        .context = &mux_observer,
+        .on_progress = MuxObserver.onProgress,
+        .should_cancel = MuxObserver.shouldCancel,
+    };
+    const mux_result = try muxer.Muxer.run(
+        allocator,
+        input_path,
+        input_path,
+        partial_path,
+        mux_options,
+    );
+    if (options.observer.isCancelled()) return error.Cancelled;
+    publishFile(partial_path, output_path) catch return error.PublishFailed;
+    published = true;
+    options.observer.report(.{
+        .stage = .completed,
+        .stage_progress = 1,
+    });
+    return .{ .frames = 0, .audio_streams = mux_result.audio_streams };
+}
 
 const MuxObserver = struct {
     observer: Observer,
