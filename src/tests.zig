@@ -8,6 +8,7 @@ const preview_proxy = @import("ui/preview_proxy.zig");
 const preview_frame_queue = @import("ui/frame_queue.zig");
 const preview_thumbnails = @import("ui/preview_thumbnails.zig");
 const thread_pool = @import("utils/thread_pool.zig");
+const line_buffer = @import("utils/line_buffer.zig");
 const engine = @import("engine/engine.zig");
 const editor = @import("editor/editor.zig");
 const analyzer = engine.analyzer;
@@ -40,6 +41,7 @@ comptime {
     _ = project_decoder;
     _ = project_renderer;
     _ = thread_pool;
+    _ = line_buffer;
 }
 
 test "derives stabilized output beside source" {

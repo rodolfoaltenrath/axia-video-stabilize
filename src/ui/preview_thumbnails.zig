@@ -4,6 +4,7 @@ const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
 
 pub const count: u32 = 10;
 pub const maximum_cell_edge: u32 = 180;
+const progress_poll_interval = 100 * sync.ns_per_ms;
 
 pub const Dimensions = struct {
     width: u32,
@@ -180,14 +181,20 @@ pub const Job = struct {
 
         const stdout = child.stdout orelse return error.MissingThumbnailProgressPipe;
         var read_buffer: [4096]u8 = undefined;
-        var file_reader = stdout.reader(sync.io(), &read_buffer);
+        var file_reader = stdout.readerStreaming(sync.io(), &read_buffer);
+        var discard_buffer: [512]u8 = undefined;
         while (true) {
             if (self.cancelled()) {
                 ffmpeg_command.terminate(&child);
                 child_terminated = true;
                 return;
             }
-            _ = try file_reader.interface.takeDelimiter('\n') orelse break;
+            const bytes_read = try sync.readWithTimeout(
+                &file_reader,
+                &discard_buffer,
+                progress_poll_interval,
+            ) orelse continue;
+            if (bytes_read == 0) break;
         }
         const term = try child.wait(sync.io());
         child_terminated = true;

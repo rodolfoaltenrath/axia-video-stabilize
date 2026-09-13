@@ -52,7 +52,14 @@ pub fn bundledFilename() []const u8 {
 /// shutdown. FFmpeg can ignore SIGTERM while blocked writing to a full pipe,
 /// which would make std.process.Child.kill() wait forever on POSIX systems.
 pub fn terminate(child: *std.process.Child) void {
-    child.kill(sync.io());
+    if (builtin.os.tag == .windows) {
+        child.kill(sync.io());
+        return;
+    }
+
+    const pid = child.id orelse return;
+    std.posix.kill(pid, .KILL) catch {};
+    _ = child.wait(sync.io()) catch {};
 }
 
 fn defaultCommand() []const u8 {
@@ -62,4 +69,20 @@ fn defaultCommand() []const u8 {
 test "bundled executable name follows the target platform" {
     const expected = if (builtin.os.tag == .windows) "ffmpeg.exe" else "ffmpeg";
     try std.testing.expectEqualStrings(expected, bundledFilename());
+}
+
+test "terminate reaps a child blocked on a full pipe" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var child = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", "while :; do printf 0123456789abcdef; done" },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+
+    terminate(&child);
+
+    try std.testing.expectEqual(null, child.id);
 }

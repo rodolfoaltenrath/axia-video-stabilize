@@ -2,8 +2,10 @@ const std = @import("std");
 const sync = @import("../utils/sync.zig");
 const builtin = @import("builtin");
 const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
+const line_buffer = @import("../utils/line_buffer.zig");
 
 const maximum_cache_bytes: u64 = 5 * 1024 * 1024 * 1024;
+const progress_poll_interval = 100 * sync.ns_per_ms;
 
 pub const Status = enum {
     idle,
@@ -163,6 +165,11 @@ pub const Job = struct {
     }
 
     fn build(self: *Job) !void {
+        var published = false;
+        defer if (!published) {
+            std.Io.Dir.deleteFileAbsolute(sync.io(), self.partial_path.?) catch {};
+        };
+
         var command = try ffmpeg_command.resolve(self.allocator);
         defer command.deinit(self.allocator);
 
@@ -253,16 +260,26 @@ pub const Job = struct {
 
         const stdout = child.stdout orelse return error.MissingProgressPipe;
         var read_buffer: [4096]u8 = undefined;
-        var file_reader = stdout.reader(sync.io(), &read_buffer);
+        var file_reader = stdout.readerStreaming(sync.io(), &read_buffer);
+        var progress_lines: line_buffer.LineBuffer(4096) = .{};
 
         while (true) {
+            while (progress_lines.peekLine()) |line| {
+                if (line.len > 0) parseProgressLine(self, line);
+                progress_lines.discardLine();
+            }
             if (self.cancelled()) {
                 ffmpeg_command.terminate(&child);
                 child_terminated = true;
                 return;
             }
-            const line = try file_reader.interface.takeDelimiter('\n') orelse break;
-            parseProgressLine(self, line);
+            const count = try sync.readWithTimeout(
+                &file_reader,
+                progress_lines.writable(),
+                progress_poll_interval,
+            ) orelse continue;
+            if (count == 0) break;
+            progress_lines.commit(count);
         }
 
         const term = try child.wait(sync.io());
@@ -275,6 +292,7 @@ pub const Job = struct {
             return error.ProxyEncodingFailed;
         }
         try std.Io.Dir.renameAbsolute(self.partial_path.?, self.output_path.?, sync.io());
+        published = true;
         pruneCache(self.allocator, cache_root, self.output_path.?, maximum_cache_bytes) catch |err| {
             std.log.warn("could not prune preview cache: {s}", .{@errorName(err)});
         };

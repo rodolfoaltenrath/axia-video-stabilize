@@ -1,5 +1,6 @@
 const std = @import("std");
 const sync = @import("../utils/sync.zig");
+const line_buffer = @import("../utils/line_buffer.zig");
 const build_options = @import("build_options");
 const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
 
@@ -12,7 +13,7 @@ const ffmpeg = if (build_options.native_ffmpeg) @cImport({
 
 pub const native_enabled = build_options.native_ffmpeg;
 
-const TranscodePipe = enum { stdout };
+const transcode_poll_interval = 100 * sync.ns_per_ms;
 
 pub const Progress = struct {
     processed_packets: u64,
@@ -627,7 +628,8 @@ fn transcodeAudioToAac(
     };
     const stdout = child.stdout orelse return error.AudioTranscodeFailed;
     var read_buffer: [4096]u8 = undefined;
-    var file_reader = stdout.reader(sync.io(), &read_buffer);
+    var file_reader = stdout.readerStreaming(sync.io(), &read_buffer);
+    var progress_lines: line_buffer.LineBuffer(4096) = .{};
 
     options.observer.report(.{
         .processed_packets = 0,
@@ -635,21 +637,29 @@ fn transcodeAudioToAac(
         .total_seconds = total_duration_seconds,
     });
     while (true) {
+        while (progress_lines.peekLine()) |line| {
+            if (transcodeProgressSeconds(line)) |seconds| {
+                options.observer.report(.{
+                    .processed_packets = audio_stream_count,
+                    .processed_seconds = seconds,
+                    .total_seconds = total_duration_seconds,
+                });
+            }
+            progress_lines.discardLine();
+        }
         if (options.observer.isCancelled()) {
             child.kill(sync.io());
             child_terminated = true;
             return error.Cancelled;
         }
-        const line = file_reader.interface.takeDelimiter('\n') catch
-            return error.AudioTranscodeFailed;
-        const progress_line = line orelse break;
-        if (transcodeProgressSeconds(progress_line)) |seconds| {
-            options.observer.report(.{
-                .processed_packets = audio_stream_count,
-                .processed_seconds = seconds,
-                .total_seconds = total_duration_seconds,
-            });
-        }
+        const count = sync.readWithTimeout(
+            &file_reader,
+            progress_lines.writable(),
+            transcode_poll_interval,
+        ) catch return error.AudioTranscodeFailed;
+        const bytes_read = count orelse continue;
+        if (bytes_read == 0) break;
+        progress_lines.commit(bytes_read);
     }
 
     const term = child.wait(sync.io()) catch return error.AudioTranscodeFailed;

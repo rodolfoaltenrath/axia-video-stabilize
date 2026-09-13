@@ -428,7 +428,7 @@ pub const Player = struct {
 
     fn readFrameInterruptibly(
         self: *Player,
-        reader: *std.Io.Reader,
+        reader: *std.Io.File.Reader,
         destination: []u8,
     ) !FrameReadResult {
         var offset: usize = 0;
@@ -573,7 +573,7 @@ pub const Player = struct {
         const stdout = child.stdout orelse return error.MissingPreviewPipe;
         const decode_result: FrameReadResult = decode: {
             var read_buffer: [64 * 1024]u8 = undefined;
-            var file_reader = stdout.reader(sync.io(), &read_buffer);
+            var file_reader = stdout.readerStreaming(sync.io(), &read_buffer);
             var decoded_index: u64 = 0;
 
             while (true) {
@@ -589,7 +589,7 @@ pub const Player = struct {
 
                 var decode_timer = try sync.Timer.start();
                 switch (try self.readFrameInterruptibly(
-                    &file_reader.interface,
+                    &file_reader,
                     self.framePixels(write_index),
                 )) {
                     .eof => break :decode .eof,

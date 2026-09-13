@@ -47,37 +47,36 @@ pub const Timer = struct {
     }
 };
 
-const TimedReadResult = union(enum) {
-    read: std.Io.Reader.ShortError!usize,
-    timeout: std.Io.Cancelable!void,
-};
-
-fn readSliceShort(reader: *std.Io.Reader, destination: []u8) std.Io.Reader.ShortError!usize {
-    return reader.readSliceShort(destination);
-}
-
-fn waitForTimeout(nanoseconds: i96) std.Io.Cancelable!void {
-    return std.Io.sleep(io(), .fromNanoseconds(nanoseconds), .awake);
+fn readSome(reader: *std.Io.Reader, destination: []u8) std.Io.Reader.Error!usize {
+    var vectors = [_][]u8{destination};
+    return reader.readVec(&vectors);
 }
 
 /// Reads available stream data while retaining a bounded cancellation point.
 /// A null result means the interval elapsed before the stream produced data.
 pub fn readWithTimeout(
-    reader: *std.Io.Reader,
+    reader: *std.Io.File.Reader,
     destination: []u8,
     timeout_nanoseconds: i96,
 ) !?usize {
-    var results: [2]TimedReadResult = undefined;
-    var select = std.Io.Select(TimedReadResult).init(io(), &results);
-    defer select.cancelDiscard();
-    select.async(.read, readSliceShort, .{ reader, destination });
-    select.async(.timeout, waitForTimeout, .{timeout_nanoseconds});
-    return switch (try select.await()) {
-        .read => |result| try result,
-        .timeout => |result| blk: {
-            try result;
-            break :blk null;
-        },
+    if (builtin.os.tag != .windows) {
+        const rounded_ms = @divTrunc(
+            @max(@as(i96, 0), timeout_nanoseconds) + ns_per_ms - 1,
+            ns_per_ms,
+        );
+        const timeout_ms = std.math.cast(i32, rounded_ms) orelse
+            std.math.maxInt(i32);
+        var descriptors = [_]std.posix.pollfd{.{
+            .fd = reader.file.handle,
+            .events = std.posix.POLL.IN | std.posix.POLL.HUP,
+            .revents = 0,
+        }};
+        if (try std.posix.poll(&descriptors, timeout_ms) == 0) return null;
+    }
+
+    return readSome(&reader.interface, destination) catch |err| switch (err) {
+        error.EndOfStream => 0,
+        error.ReadFailed => return error.ReadFailed,
     };
 }
 
