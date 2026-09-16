@@ -131,9 +131,11 @@ frame rate, encoded bitrate and HDR rather
 than resolution alone. Lighter sources remain capped at 960x540 and 30 fps.
 For demanding sources, Axia keeps the first decoded frame as a poster and
 builds a video-only H.264 proxy in the user's cache. HDR proxies are tone
-mapped to SDR BT.709. The monitor switches to the proxy automatically when it
-is ready, and later imports reuse the cached file. Proxy creation never changes
-the project source used by stabilization or export.
+mapped to SDR BT.709 at an intermediate 1.5x preview resolution. Proxy workers
+size their decoder, filter and encoder thread counts from the available CPUs.
+The monitor switches to the proxy automatically when it is ready, and later
+imports reuse the cached file. Proxy creation never changes the project source
+used by stabilization or export.
 Decoding uses FFmpeg's automatic codec threading and attempts available
 hardware acceleration with a transparent software fallback. Preview resolution
 and throttling never change analysis or export, which continue to consume the
@@ -147,8 +149,10 @@ prioritizes image quality, **Padrão** keeps the engine defaults and **Leve**
 trades some fidelity for a smaller, faster export. During processing, the
 timeline distinguishes analysis, trajectory smoothing, rendering and final
 muxing, and reports measured frames per second with an ETA when enough samples
-are available. The application opens maximized to match the monitor's available
-workspace and remains resizable through the native window controls.
+are available. HDR tone mapping is parallelized across CPU cores; the standard
+and light profiles use linear affine interpolation while the high profile keeps
+cubic interpolation. The application opens maximized to match the monitor's
+available workspace and remains resizable through the native window controls.
 
 Stabilization can be disabled in the clip inspector. In that mode Axia skips
 motion analysis and video re-encoding, remuxes the original video losslessly

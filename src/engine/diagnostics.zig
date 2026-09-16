@@ -197,9 +197,10 @@ test "diagnostic CSV contains analysis and stabilization metrics" {
 
     try writeCsv(std.testing.allocator, path, &analysis);
     const contents = try temporary.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "diagnostics.csv",
-        16 * 1024,
+        std.testing.allocator,
+        .limited(16 * 1024),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.startsWith(u8, contents, header));

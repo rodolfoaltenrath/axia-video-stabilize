@@ -296,7 +296,8 @@ extern "C" int32_t axia_cv_warp_affine_bgra8(
     size_t destination_stride,
     int32_t width,
     int32_t height,
-    const AxiaAffine2d *matrix) {
+    const AxiaAffine2d *matrix,
+    int32_t interpolation) {
     clear_error();
 
     const bool valid_width =
@@ -307,7 +308,8 @@ extern "C" int32_t axia_cv_warp_affine_bgra8(
     if (source_pixels == nullptr || destination_pixels == nullptr ||
         matrix == nullptr || !valid_width || height <= 0 ||
         source_stride < minimum_stride ||
-        destination_stride < minimum_stride) {
+        destination_stride < minimum_stride ||
+        (interpolation != 0 && interpolation != 1)) {
         set_error("invalid BGRA warp arguments");
         return AXIA_CV_INVALID_ARGUMENT;
     }
@@ -332,12 +334,15 @@ extern "C" int32_t axia_cv_warp_affine_bgra8(
             matrix->m10,
             matrix->m11,
             matrix->m12);
+        const int interpolation_flag = interpolation == 0
+            ? cv::INTER_LINEAR
+            : cv::INTER_CUBIC;
         cv::warpAffine(
             source,
             destination,
             affine,
             cv::Size(width, height),
-            cv::INTER_CUBIC,
+            interpolation_flag,
             cv::BORDER_REPLICATE);
         return AXIA_CV_OK;
     } catch (const cv::Exception &exception) {
@@ -348,6 +353,109 @@ extern "C" int32_t axia_cv_warp_affine_bgra8(
         set_error("unknown OpenCV exception");
     }
 
+    return AXIA_CV_EXCEPTION;
+}
+
+extern "C" int32_t axia_cv_tone_map_hdr_bgra16(
+    const uint16_t *source_pixels,
+    size_t source_stride,
+    uint8_t *destination_pixels,
+    size_t destination_stride,
+    int32_t width,
+    int32_t height,
+    const float *linear_lut,
+    const uint8_t *transfer_lut,
+    int32_t convert_bt2020,
+    int32_t grayscale) {
+    clear_error();
+
+    const bool valid_width = width > 0 &&
+        static_cast<size_t>(width) <= SIZE_MAX / (4 * sizeof(uint16_t));
+    const size_t source_row_bytes = valid_width
+        ? static_cast<size_t>(width) * 4 * sizeof(uint16_t)
+        : 0;
+    const size_t destination_row_bytes = valid_width
+        ? static_cast<size_t>(width) * (grayscale != 0 ? 1 : 4)
+        : 0;
+    if (source_pixels == nullptr || destination_pixels == nullptr ||
+        linear_lut == nullptr || transfer_lut == nullptr ||
+        !valid_width || height <= 0 || source_stride < source_row_bytes ||
+        destination_stride < destination_row_bytes) {
+        set_error("invalid HDR tone-map arguments");
+        return AXIA_CV_INVALID_ARGUMENT;
+    }
+
+    try {
+        cv::parallel_for_(cv::Range(0, height), [&](const cv::Range &range) {
+            for (int32_t row = range.start; row < range.end; ++row) {
+                const auto *source = reinterpret_cast<const uint16_t *>(
+                    reinterpret_cast<const uint8_t *>(source_pixels) +
+                    static_cast<size_t>(row) * source_stride);
+                auto *destination = destination_pixels +
+                    static_cast<size_t>(row) * destination_stride;
+                for (int32_t column = 0; column < width; ++column) {
+                    const size_t source_index = static_cast<size_t>(column) * 4;
+                    float blue = linear_lut[source[source_index]];
+                    float green = linear_lut[source[source_index + 1]];
+                    float red = linear_lut[source[source_index + 2]];
+                    if (convert_bt2020 != 0) {
+                        const float converted_red = 1.660491f * red -
+                            0.587641f * green - 0.072850f * blue;
+                        const float converted_green = -0.124550f * red +
+                            1.132900f * green - 0.008349f * blue;
+                        const float converted_blue = -0.018151f * red -
+                            0.100579f * green + 1.118730f * blue;
+                        red = converted_red;
+                        green = converted_green;
+                        blue = converted_blue;
+                    }
+                    red = std::max(red, 0.0f);
+                    green = std::max(green, 0.0f);
+                    blue = std::max(blue, 0.0f);
+                    const float luminance = 0.2126f * red +
+                        0.7152f * green + 0.0722f * blue;
+                    const float numerator = luminance *
+                        (2.51f * luminance + 0.03f);
+                    const float denominator = luminance *
+                        (2.43f * luminance + 0.59f) + 0.14f;
+                    const float mapped_luminance = luminance <= 0.0f
+                        ? 0.0f
+                        : std::clamp(numerator / denominator, 0.0f, 1.0f);
+                    const float scale = luminance > 0.000001f
+                        ? mapped_luminance / luminance
+                        : 0.0f;
+                    red = std::clamp(red * scale, 0.0f, 1.0f);
+                    green = std::clamp(green * scale, 0.0f, 1.0f);
+                    blue = std::clamp(blue * scale, 0.0f, 1.0f);
+                    const auto lut_index = [](float value) {
+                        return static_cast<uint16_t>(std::lround(
+                            std::clamp(value, 0.0f, 1.0f) * 65535.0f));
+                    };
+                    if (grayscale != 0) {
+                        destination[column] = transfer_lut[
+                            lut_index(mapped_luminance)];
+                    } else {
+                        const size_t destination_index =
+                            static_cast<size_t>(column) * 4;
+                        destination[destination_index] =
+                            transfer_lut[lut_index(blue)];
+                        destination[destination_index + 1] =
+                            transfer_lut[lut_index(green)];
+                        destination[destination_index + 2] =
+                            transfer_lut[lut_index(red)];
+                        destination[destination_index + 3] = 255;
+                    }
+                }
+            }
+        });
+        return AXIA_CV_OK;
+    } catch (const cv::Exception &exception) {
+        set_error(exception.what());
+    } catch (const std::exception &exception) {
+        set_error(exception.what());
+    } catch (...) {
+        set_error("unknown OpenCV exception");
+    }
     return AXIA_CV_EXCEPTION;
 }
 

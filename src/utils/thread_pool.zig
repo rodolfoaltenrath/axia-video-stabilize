@@ -132,6 +132,12 @@ pub const ThreadPool = struct {
                     .crf = encoder_profile.crf,
                     .preset = encoder_profile.preset,
                 },
+                .renderer = .{
+                    .interpolation = if (config.parameters.export_quality == .high)
+                        .cubic
+                    else
+                        .linear,
+                },
                 .observer = .{
                     .context = &progress,
                     .on_progress = NativeProgress.onProgress,

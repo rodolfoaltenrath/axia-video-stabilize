@@ -6,6 +6,7 @@ const line_buffer = @import("../utils/line_buffer.zig");
 
 const maximum_cache_bytes: u64 = 5 * 1024 * 1024 * 1024;
 const progress_poll_interval = 100 * sync.ns_per_ms;
+const cache_version = "v3";
 
 pub const Status = enum {
     idle,
@@ -200,6 +201,21 @@ pub const Job = struct {
             .{@as(u32, @intFromFloat(@max(1, @round(self.options.fps))))},
         );
         defer self.allocator.free(gop);
+        const cpu_count = std.Thread.getCpuCount() catch 4;
+        const decoder_thread_count = @max(2, @min(12, cpu_count * 3 / 4));
+        const worker_thread_count = @max(2, @min(4, cpu_count / 4));
+        const decoder_threads = try std.fmt.allocPrint(
+            self.allocator,
+            "{d}",
+            .{decoder_thread_count},
+        );
+        defer self.allocator.free(decoder_threads);
+        const worker_threads = try std.fmt.allocPrint(
+            self.allocator,
+            "{d}",
+            .{worker_thread_count},
+        );
+        defer self.allocator.free(worker_threads);
 
         const argv = [_][]const u8{
             command.path,
@@ -208,12 +224,12 @@ pub const Job = struct {
             "error",
             "-nostdin",
             "-filter_threads",
-            "2",
+            worker_threads,
             "-progress",
             "pipe:1",
             "-nostats",
             "-threads",
-            "4",
+            decoder_threads,
             "-i",
             self.source_path.?,
             "-map",
@@ -226,7 +242,7 @@ pub const Job = struct {
             "-c:v",
             "libx264",
             "-threads",
-            "2",
+            worker_threads,
             "-preset",
             "veryfast",
             "-tune",
@@ -317,7 +333,7 @@ fn proxyPaths(
     } else try std.Io.Dir.cwd().statFile(sync.io(), source_path, .{});
     const identity = try std.fmt.allocPrint(
         allocator,
-        "v2\x00{s}\x00{d}\x00{d}\x00{d}x{d}\x00{d}x{d}\x00{d:.6}\x00{}",
+        cache_version ++ "\x00{s}\x00{d}\x00{d}\x00{d}x{d}\x00{d}x{d}\x00{d:.6}\x00{}",
         .{
             source_path,
             stat.size,
@@ -347,19 +363,19 @@ fn proxyPaths(
 fn proxyCacheRoot(allocator: std.mem.Allocator) ![]u8 {
     if (sync.getEnvOwned(allocator, "XDG_CACHE_HOME")) |base| {
         defer allocator.free(base);
-        if (base.len > 0) return std.fs.path.join(allocator, &.{ base, "axia", "proxies", "v2" });
+        if (base.len > 0) return std.fs.path.join(allocator, &.{ base, "axia", "proxies", cache_version });
     } else |_| {}
 
     if (builtin.os.tag == .windows) {
         const base = sync.getEnvOwned(allocator, "LOCALAPPDATA") catch
             try sync.getEnvOwned(allocator, "APPDATA");
         defer allocator.free(base);
-        return std.fs.path.join(allocator, &.{ base, "Axia", "cache", "proxies", "v2" });
+        return std.fs.path.join(allocator, &.{ base, "Axia", "cache", "proxies", cache_version });
     }
 
     const home = try sync.getEnvOwned(allocator, "HOME");
     defer allocator.free(home);
-    return std.fs.path.join(allocator, &.{ home, ".cache", "axia", "proxies", "v2" });
+    return std.fs.path.join(allocator, &.{ home, ".cache", "axia", "proxies", cache_version });
 }
 
 fn buildFilter(
@@ -377,12 +393,12 @@ fn buildFilter(
     }
 
     // Tone mapping a 4K/8K float frame is disproportionately expensive. Work
-    // at twice the final preview resolution to retain fine highlight detail,
+    // at 1.5x the final preview resolution to retain fine highlight detail,
     // then perform the final Lanczos reduction after conversion to BT.709.
-    const doubled_width = std.math.mul(u32, options.width, 2) catch std.math.maxInt(u32);
-    const doubled_height = std.math.mul(u32, options.height, 2) catch std.math.maxInt(u32);
-    const tone_width = @min(options.source_width, doubled_width);
-    const tone_height = @min(options.source_height, doubled_height);
+    const expanded_width = std.math.mul(u32, options.width, 3) catch std.math.maxInt(u32);
+    const expanded_height = std.math.mul(u32, options.height, 3) catch std.math.maxInt(u32);
+    const tone_width = @min(options.source_width, expanded_width / 2);
+    const tone_height = @min(options.source_height, expanded_height / 2);
     return std.fmt.allocPrint(
         allocator,
         "fps={s},zscale=w={d}:h={d}:filter=lanczos:transfer=linear:npl=100," ++
@@ -504,7 +520,7 @@ test "proxy progress follows encoded media time" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), job.snapshot().progress, 0.0001);
 }
 
-test "HDR proxy limits float tone mapping to twice the preview size" {
+test "HDR proxy limits float tone mapping to 1.5x the preview size" {
     const filter = try buildFilter(std.testing.allocator, .{
         .source_width = 2160,
         .source_height = 3840,
@@ -519,7 +535,7 @@ test "HDR proxy limits float tone mapping to twice the preview size" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         filter,
-        "zscale=w=1080:h=1920:filter=lanczos:transfer=linear",
+        "zscale=w=810:h=1440:filter=lanczos:transfer=linear",
     ) != null);
     try std.testing.expect(std.mem.endsWith(
         u8,

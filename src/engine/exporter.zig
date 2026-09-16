@@ -44,6 +44,7 @@ pub const Options = struct {
     stabilization_enabled: bool = true,
     session: session_mod.Options = .{},
     encoder: encoder_mod.Options = .{},
+    renderer: renderer.Options = .{},
     muxer: muxer.Options = .{},
     diagnostics_path: ?[]const u8 = null,
     observer: Observer = .{},
@@ -167,10 +168,11 @@ const NativeExporter = struct {
             .observer = options.observer,
             .total_frames = @intCast(analysis.records.len),
         };
-        renderer.Renderer.run(
+        renderer.Renderer.runWithOptions(
             allocator,
             input_path,
             &analysis,
+            options.renderer,
             .{
                 .context = &sink,
                 .on_frame = EncoderSink.onFrame,

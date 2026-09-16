@@ -49,6 +49,7 @@ pub const StabilizationLookup = struct {
 
 pub const PreparedEffects = struct {
     context: ?*anyopaque = null,
+    interpolation: warp.Interpolation = .cubic,
     stabilization_matrix: ?*const fn (
         ?*anyopaque,
         StabilizationLookup,
@@ -119,6 +120,7 @@ pub fn processBgra(
         frame.width,
         frame.height,
         matrix,
+        prepared.interpolation,
     );
 }
 

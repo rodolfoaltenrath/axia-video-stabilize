@@ -13,6 +13,11 @@ pub const Point = struct {
     y: f64,
 };
 
+pub const Interpolation = enum(c_int) {
+    linear = 0,
+    cubic = 1,
+};
+
 pub const AffineMatrix = extern struct {
     m00: f64,
     m01: f64,
@@ -137,6 +142,7 @@ pub fn warpBgra(
     width: u32,
     height: u32,
     matrix: AffineMatrix,
+    interpolation: Interpolation,
 ) WarpError!void {
     if (!native_enabled) return error.OpenCvDisabled;
     try matrix.validate();
@@ -171,6 +177,7 @@ pub fn warpBgra(
         @intCast(width),
         @intCast(height),
         @ptrCast(&matrix),
+        @intFromEnum(interpolation),
     );
     if (status != cv.AXIA_CV_OK) {
         return switch (status) {

@@ -12,6 +12,10 @@ const ffmpeg = if (build_options.native_ffmpeg) @cImport({
     @cInclude("libswscale/swscale.h");
 }) else struct {};
 
+const cv = if (build_options.native_opencv) @cImport({
+    @cInclude("opencv_bridge.h");
+}) else struct {};
+
 pub const native_enabled = build_options.native_ffmpeg;
 
 pub const DecoderError = error{
@@ -707,6 +711,25 @@ const NativeDecoder = struct {
     }
 
     fn toneMapHdr(self: *NativeDecoder, color: ColorInfo) void {
+        if (build_options.native_opencv) {
+            const status = cv.axia_cv_tone_map_hdr_bgra16(
+                self.hdr_pixels.?.ptr,
+                @as(usize, self.output_dimensions.width) * 4 * @sizeOf(u16),
+                self.output_pixels.ptr,
+                self.output_stride,
+                @intCast(self.output_dimensions.width),
+                @intCast(self.output_dimensions.height),
+                self.hdr_linear_lut.?.ptr,
+                self.sdr_transfer_lut.?.ptr,
+                @intFromBool(color.primaries == color_primaries_bt2020),
+                @intFromBool(self.output_format == .gray8),
+            );
+            if (status == cv.AXIA_CV_OK) return;
+        }
+        self.toneMapHdrScalar(color);
+    }
+
+    fn toneMapHdrScalar(self: *NativeDecoder, color: ColorInfo) void {
         const source = self.hdr_pixels.?;
         const linear_lut = self.hdr_linear_lut.?;
         const transfer_lut = self.sdr_transfer_lut.?;

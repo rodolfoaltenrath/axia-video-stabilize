@@ -67,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
         output_path,
         .{
             .diagnostics_path = diagnostics_path,
+            .renderer = .{ .interpolation = .linear },
             .observer = .{
                 .context = &progress,
                 .on_progress = CliProgress.onProgress,

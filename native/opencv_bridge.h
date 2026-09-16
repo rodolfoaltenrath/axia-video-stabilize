@@ -102,7 +102,20 @@ int32_t axia_cv_warp_affine_bgra8(
     size_t destination_stride,
     int32_t width,
     int32_t height,
-    const AxiaAffine2d *matrix);
+    const AxiaAffine2d *matrix,
+    int32_t interpolation);
+
+int32_t axia_cv_tone_map_hdr_bgra16(
+    const uint16_t *source_pixels,
+    size_t source_stride,
+    uint8_t *destination_pixels,
+    size_t destination_stride,
+    int32_t width,
+    int32_t height,
+    const float *linear_lut,
+    const uint8_t *transfer_lut,
+    int32_t convert_bt2020,
+    int32_t grayscale);
 
 const char *axia_cv_last_error(void);
 

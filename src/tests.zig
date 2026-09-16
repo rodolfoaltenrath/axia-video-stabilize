@@ -28,6 +28,9 @@ const session = engine.session;
 const stabilization_effect = engine.stabilization_effect;
 const trajectory = engine.trajectory;
 const warp = engine.warp;
+const cv = if (build_options.native_opencv) @cImport({
+    @cInclude("opencv_bridge.h");
+}) else struct {};
 
 comptime {
     _ = editor;
@@ -1964,8 +1967,44 @@ test "native BGRA warper preserves an identity frame" {
         width,
         height,
         warp.AffineMatrix.identity(),
+        .cubic,
     );
     try std.testing.expectEqualSlices(u8, &source, &destination);
+}
+
+test "parallel HDR tone mapper preserves black and maps diffuse white" {
+    if (!build_options.native_opencv) return error.SkipZigTest;
+
+    const linear_lut = try std.testing.allocator.alloc(f32, 65_536);
+    defer std.testing.allocator.free(linear_lut);
+    @memset(linear_lut, 0);
+    linear_lut[65_535] = 1;
+    const transfer_lut = try std.testing.allocator.alloc(u8, 65_536);
+    defer std.testing.allocator.free(transfer_lut);
+    for (transfer_lut, 0..) |*value, index| value.* = @intCast(index >> 8);
+
+    const source = [_]u16{
+        0,      0,      0,      65_535,
+        65_535, 65_535, 65_535, 65_535,
+    };
+    var destination: [8]u8 = undefined;
+    try std.testing.expectEqual(cv.AXIA_CV_OK, cv.axia_cv_tone_map_hdr_bgra16(
+        &source,
+        source.len * @sizeOf(u16),
+        &destination,
+        destination.len,
+        2,
+        1,
+        linear_lut.ptr,
+        transfer_lut.ptr,
+        0,
+        0,
+    ));
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 0, 0, 255, 205, 205, 205, 255 },
+        &destination,
+    );
 }
 
 test "native decoder reports a missing input without leaking ownership" {

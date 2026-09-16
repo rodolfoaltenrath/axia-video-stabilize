@@ -35,6 +35,10 @@ pub const Observer = struct {
     }
 };
 
+pub const Options = struct {
+    interpolation: warp.Interpolation = .cubic,
+};
+
 pub const RenderError = error{
     BackendNotEnabled,
     Cancelled,
@@ -77,9 +81,20 @@ const DisabledRenderer = struct {
         analysis: *const session_mod.Analysis,
         observer: Observer,
     ) RenderError!void {
+        return runWithOptions(allocator, input_path, analysis, .{}, observer);
+    }
+
+    pub fn runWithOptions(
+        allocator: std.mem.Allocator,
+        input_path: []const u8,
+        analysis: *const session_mod.Analysis,
+        options: Options,
+        observer: Observer,
+    ) RenderError!void {
         _ = allocator;
         _ = input_path;
         _ = analysis;
+        _ = options;
         _ = observer;
         return error.BackendNotEnabled;
     }
@@ -92,6 +107,16 @@ const NativeRenderer = struct {
         allocator: std.mem.Allocator,
         input_path: []const u8,
         analysis: *const session_mod.Analysis,
+        observer: Observer,
+    ) RenderError!void {
+        return runWithOptions(allocator, input_path, analysis, .{}, observer);
+    }
+
+    pub fn runWithOptions(
+        allocator: std.mem.Allocator,
+        input_path: []const u8,
+        analysis: *const session_mod.Analysis,
+        options: Options,
         observer: Observer,
     ) RenderError!void {
         if (observer.isCancelled()) return error.Cancelled;
@@ -163,6 +188,7 @@ const NativeRenderer = struct {
                 &compatibility_effects,
                 .{
                     .context = &prepared,
+                    .interpolation = options.interpolation,
                     .stabilization_matrix = CompatibilityPrepared.stabilizationMatrix,
                 },
             );
