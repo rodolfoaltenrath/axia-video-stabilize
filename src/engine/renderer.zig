@@ -50,7 +50,8 @@ pub const RenderError = error{
     SinkFailed,
     SizeOverflow,
 } || decoder_mod.DecoderError || session_mod.SessionError ||
-    frame_pipeline.Error || warp.WarpError || std.mem.Allocator.Error;
+    frame_pipeline.Error || warp.WarpError || std.mem.Allocator.Error ||
+    std.Thread.SpawnError;
 
 const CompatibilityPrepared = struct {
     analysis: *const session_mod.Analysis,
@@ -69,6 +70,62 @@ const CompatibilityPrepared = struct {
         }
         return self.analysis.renderMatrix(frame_index) catch
             return error.InvalidPreparedEffect;
+    }
+};
+
+const RenderJob = struct {
+    analysis: *const session_mod.Analysis,
+    observer: Observer,
+    options: Options,
+    frame: Frame,
+    frame_index: usize,
+    output_pixels: []u8,
+    output_stride: usize,
+    result: ?RenderError = null,
+
+    fn run(self: *RenderJob) void {
+        self.execute() catch |err| {
+            self.result = err;
+        };
+    }
+
+    fn execute(self: *RenderJob) RenderError!void {
+        if (self.observer.isCancelled()) return error.Cancelled;
+        const source_time = try editor_time.Time.fromUnits(
+            self.frame.timing.pts,
+            self.frame.timing.time_base.numerator,
+            self.frame.timing.time_base.denominator,
+        );
+        const compatibility_effects = [_]effect_mod.Effect{
+            .{ .stabilization = .{} },
+        };
+        var prepared = CompatibilityPrepared{ .analysis = self.analysis };
+        try frame_pipeline.processBgra(
+            self.frame.pixels,
+            self.frame.stride,
+            self.output_pixels,
+            self.output_stride,
+            .{
+                .clip_id = 0,
+                .source_time = source_time,
+                .frame_index = self.frame_index,
+                .width = self.frame.width,
+                .height = self.frame.height,
+            },
+            &compatibility_effects,
+            .{
+                .context = &prepared,
+                .interpolation = self.options.interpolation,
+                .stabilization_matrix = CompatibilityPrepared.stabilizationMatrix,
+            },
+        );
+        if (!self.observer.submit(.{
+            .timing = self.frame.timing,
+            .pixels = self.output_pixels,
+            .width = self.frame.width,
+            .height = self.frame.height,
+            .stride = self.output_stride,
+        })) return error.SinkFailed;
     }
 };
 
@@ -144,63 +201,60 @@ const NativeRenderer = struct {
         ) catch return error.SizeOverflow;
         const output_pixels = try allocator.alloc(u8, buffer_size);
         defer allocator.free(output_pixels);
+        var replacement_pixels = try allocator.alloc(
+            u8,
+            decoder.outputBufferCapacity(),
+        );
+        defer allocator.free(replacement_pixels);
 
         var rendered_count: usize = 0;
-        const compatibility_effects = [_]effect_mod.Effect{
-            .{ .stabilization = .{} },
-        };
-        var prepared = CompatibilityPrepared{ .analysis = analysis };
-        while (try decoder.readFrame()) |frame| {
+        var pending_frame = try decoder.readFrame();
+        while (pending_frame) |decoded_frame| {
             if (observer.isCancelled()) return error.Cancelled;
             if (rendered_count >= analysis.records.len) {
                 return error.FrameCountMismatch;
             }
-            if (frame.timing.index != @as(u64, @intCast(rendered_count))) {
+            if (decoded_frame.timing.index != @as(u64, @intCast(rendered_count))) {
                 return error.UnexpectedFrameIndex;
             }
-            if (frame.format != .bgra8) return error.PixelFormatMismatch;
+            if (decoded_frame.format != .bgra8) return error.PixelFormatMismatch;
             const expected_timing = analysis.records[rendered_count].timing;
-            if (frame.timing.pts != expected_timing.pts or
-                frame.timing.time_base.numerator !=
+            if (decoded_frame.timing.pts != expected_timing.pts or
+                decoded_frame.timing.time_base.numerator !=
                     expected_timing.time_base.numerator or
-                frame.timing.time_base.denominator !=
+                decoded_frame.timing.time_base.denominator !=
                     expected_timing.time_base.denominator)
             {
                 return error.TimingMismatch;
             }
-            const source_time = try editor_time.Time.fromUnits(
-                frame.timing.pts,
-                frame.timing.time_base.numerator,
-                frame.timing.time_base.denominator,
+
+            const source_pixels = try decoder.exchangeOutputBuffer(
+                replacement_pixels,
             );
-            try frame_pipeline.processBgra(
-                frame.pixels,
-                frame.stride,
-                output_pixels,
-                stride,
-                .{
-                    .clip_id = 0,
-                    .source_time = source_time,
-                    .frame_index = rendered_count,
-                    .width = frame.width,
-                    .height = frame.height,
+            var job = RenderJob{
+                .analysis = analysis,
+                .observer = observer,
+                .options = options,
+                .frame = .{
+                    .timing = decoded_frame.timing,
+                    .pixels = source_pixels,
+                    .width = decoded_frame.width,
+                    .height = decoded_frame.height,
+                    .stride = decoded_frame.stride,
                 },
-                &compatibility_effects,
-                .{
-                    .context = &prepared,
-                    .interpolation = options.interpolation,
-                    .stabilization_matrix = CompatibilityPrepared.stabilizationMatrix,
-                },
-            );
-            if (!observer.submit(.{
-                .timing = frame.timing,
-                .pixels = output_pixels,
-                .width = frame.width,
-                .height = frame.height,
-                .stride = stride,
-            })) {
-                return error.SinkFailed;
-            }
+                .frame_index = rendered_count,
+                .output_pixels = output_pixels,
+                .output_stride = stride,
+            };
+            const worker = std.Thread.spawn(.{}, RenderJob.run, .{&job}) catch |err| {
+                replacement_pixels = source_pixels;
+                return err;
+            };
+            const next_result = decoder.readFrame();
+            worker.join();
+            replacement_pixels = source_pixels;
+            if (job.result) |err| return err;
+            pending_frame = try next_result;
             rendered_count += 1;
         }
         if (rendered_count != analysis.records.len) {

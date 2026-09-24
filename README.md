@@ -151,8 +151,11 @@ timeline distinguishes analysis, trajectory smoothing, rendering and final
 muxing, and reports measured frames per second with an ETA when enough samples
 are available. HDR tone mapping is parallelized across CPU cores; the standard
 and light profiles use linear affine interpolation while the high profile keeps
-cubic interpolation. The application opens maximized to match the monitor's
-available workspace and remains resizable through the native window controls.
+cubic interpolation. During export, decoding the next frame overlaps the
+stabilization and encoding of the current frame through reusable buffers, so
+high-resolution frames are not copied between stages. The application opens
+maximized to match the monitor's available workspace and remains resizable
+through the native window controls.
 
 Stabilization can be disabled in the clip inspector. In that mode Axia skips
 motion analysis and video re-encoding, remuxes the original video losslessly

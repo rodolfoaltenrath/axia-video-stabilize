@@ -463,6 +463,25 @@ const NativeDecoder = struct {
         self.* = undefined;
     }
 
+    /// Replaces the reusable conversion buffer and transfers ownership of the
+    /// previous one to the caller. This lets the renderer process one decoded
+    /// frame while the decoder fills the next buffer without copying a frame.
+    pub fn exchangeOutputBuffer(
+        self: *NativeDecoder,
+        replacement: []u8,
+    ) DecoderError![]u8 {
+        if (replacement.len != self.output_pixels.len) {
+            return error.ConversionFailed;
+        }
+        const previous = self.output_pixels;
+        self.output_pixels = replacement;
+        return previous;
+    }
+
+    pub fn outputBufferCapacity(self: *const NativeDecoder) usize {
+        return self.output_pixels.len;
+    }
+
     pub fn readFrame(self: *NativeDecoder) DecoderError!?FrameView {
         if (self.finished) return null;
 
