@@ -1999,12 +1999,108 @@ test "parallel HDR tone mapper preserves black and maps diffuse white" {
         transfer_lut.ptr,
         0,
         0,
+        0,
     ));
     try std.testing.expectEqualSlices(
         u8,
         &.{ 0, 0, 0, 255, 205, 205, 205, 255 },
         &destination,
     );
+}
+
+test "parallel HDR tone mapper accepts a compact linear lookup table" {
+    if (!build_options.native_opencv) return error.SkipZigTest;
+
+    var linear_lut: [4096]f32 = undefined;
+    @memset(&linear_lut, 0);
+    linear_lut[linear_lut.len - 1] = 1;
+    const transfer_lut = try std.testing.allocator.alloc(u8, 65_536);
+    defer std.testing.allocator.free(transfer_lut);
+    for (transfer_lut, 0..) |*value, index| value.* = @intCast(index >> 8);
+
+    const source = [_]u16{
+        0,      0,      0,      65_535,
+        65_535, 65_535, 65_535, 65_535,
+    };
+    var destination: [8]u8 = undefined;
+    try std.testing.expectEqual(cv.AXIA_CV_OK, cv.axia_cv_tone_map_hdr_bgra16(
+        &source,
+        source.len * @sizeOf(u16),
+        &destination,
+        destination.len,
+        2,
+        1,
+        &linear_lut,
+        transfer_lut.ptr,
+        4,
+        0,
+        0,
+    ));
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 0, 0, 255, 205, 205, 205, 255 },
+        &destination,
+    );
+}
+
+test "compact HDR lookup stays within one output level of full precision" {
+    if (!build_options.native_opencv) return error.SkipZigTest;
+
+    const width = 512;
+    const full_lut = try std.testing.allocator.alloc(f32, 65_536);
+    defer std.testing.allocator.free(full_lut);
+    const compact_lut = try std.testing.allocator.alloc(f32, 4096);
+    defer std.testing.allocator.free(compact_lut);
+    const transfer_lut = try std.testing.allocator.alloc(u8, 65_536);
+    defer std.testing.allocator.free(transfer_lut);
+    for (full_lut, 0..) |*value, index| {
+        value.* = @as(f32, @floatFromInt(index)) / 65_535;
+        transfer_lut[index] = @intCast(index >> 8);
+    }
+    for (compact_lut, 0..) |*value, index| {
+        value.* = @as(f32, @floatFromInt(index << 4)) / 65_535;
+    }
+
+    var source: [width * 4]u16 = undefined;
+    for (0..width) |column| {
+        const pixel = column * 4;
+        source[pixel] = @intCast((column * 251) & 0xffff);
+        source[pixel + 1] = @intCast(((width - 1 - column) * 251) & 0xffff);
+        source[pixel + 2] = @intCast((column * 127) & 0xffff);
+        source[pixel + 3] = std.math.maxInt(u16);
+    }
+    var full_destination: [width * 4]u8 = undefined;
+    var compact_destination: [width * 4]u8 = undefined;
+    try std.testing.expectEqual(cv.AXIA_CV_OK, cv.axia_cv_tone_map_hdr_bgra16(
+        &source,
+        source.len * @sizeOf(u16),
+        &full_destination,
+        full_destination.len,
+        width,
+        1,
+        full_lut.ptr,
+        transfer_lut.ptr,
+        0,
+        0,
+        0,
+    ));
+    try std.testing.expectEqual(cv.AXIA_CV_OK, cv.axia_cv_tone_map_hdr_bgra16(
+        &source,
+        source.len * @sizeOf(u16),
+        &compact_destination,
+        compact_destination.len,
+        width,
+        1,
+        compact_lut.ptr,
+        transfer_lut.ptr,
+        4,
+        0,
+        0,
+    ));
+    for (full_destination, compact_destination) |full, compact| {
+        const difference = @abs(@as(i16, full) - @as(i16, compact));
+        try std.testing.expect(difference <= 1);
+    }
 }
 
 test "native decoder reports a missing input without leaking ownership" {

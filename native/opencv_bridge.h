@@ -114,6 +114,7 @@ int32_t axia_cv_tone_map_hdr_bgra16(
     int32_t height,
     const float *linear_lut,
     const uint8_t *transfer_lut,
+    int32_t linear_lut_shift,
     int32_t convert_bt2020,
     int32_t grayscale);
 

@@ -365,6 +365,7 @@ extern "C" int32_t axia_cv_tone_map_hdr_bgra16(
     int32_t height,
     const float *linear_lut,
     const uint8_t *transfer_lut,
+    int32_t linear_lut_shift,
     int32_t convert_bt2020,
     int32_t grayscale) {
     clear_error();
@@ -380,7 +381,8 @@ extern "C" int32_t axia_cv_tone_map_hdr_bgra16(
     if (source_pixels == nullptr || destination_pixels == nullptr ||
         linear_lut == nullptr || transfer_lut == nullptr ||
         !valid_width || height <= 0 || source_stride < source_row_bytes ||
-        destination_stride < destination_row_bytes) {
+        destination_stride < destination_row_bytes || linear_lut_shift < 0 ||
+        linear_lut_shift > 15) {
         set_error("invalid HDR tone-map arguments");
         return AXIA_CV_INVALID_ARGUMENT;
     }
@@ -395,9 +397,12 @@ extern "C" int32_t axia_cv_tone_map_hdr_bgra16(
                     static_cast<size_t>(row) * destination_stride;
                 for (int32_t column = 0; column < width; ++column) {
                     const size_t source_index = static_cast<size_t>(column) * 4;
-                    float blue = linear_lut[source[source_index]];
-                    float green = linear_lut[source[source_index + 1]];
-                    float red = linear_lut[source[source_index + 2]];
+                    float blue = linear_lut[
+                        source[source_index] >> linear_lut_shift];
+                    float green = linear_lut[
+                        source[source_index + 1] >> linear_lut_shift];
+                    float red = linear_lut[
+                        source[source_index + 2] >> linear_lut_shift];
                     if (convert_bt2020 != 0) {
                         const float converted_red = 1.660491f * red -
                             0.587641f * green - 0.072850f * blue;

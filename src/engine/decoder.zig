@@ -244,6 +244,7 @@ const NativeDecoder = struct {
     output_stride: usize,
     hdr_pixels: ?[]u16 = null,
     hdr_linear_lut: ?[]f32 = null,
+    hdr_compact_linear_lut: ?[]f32 = null,
     sdr_transfer_lut: ?[]u8 = null,
     hdr_lut_transfer: i32 = color_transfer_unspecified,
     next_index: u64 = 0,
@@ -447,6 +448,7 @@ const NativeDecoder = struct {
     pub fn deinit(self: *NativeDecoder) void {
         if (self.sws_context) |context| ffmpeg.sws_freeContext(context);
         if (self.sdr_transfer_lut) |lut| self.allocator.free(lut);
+        if (self.hdr_compact_linear_lut) |lut| self.allocator.free(lut);
         if (self.hdr_linear_lut) |lut| self.allocator.free(lut);
         if (self.hdr_pixels) |pixels| self.allocator.free(pixels);
 
@@ -709,6 +711,12 @@ const NativeDecoder = struct {
         if (self.hdr_linear_lut == null) {
             self.hdr_linear_lut = try self.allocator.alloc(f32, hdr_lut_size);
         }
+        if (self.hdr_compact_linear_lut == null) {
+            self.hdr_compact_linear_lut = try self.allocator.alloc(
+                f32,
+                hdr_compact_lut_size,
+            );
+        }
         if (self.sdr_transfer_lut == null) {
             const lut = try self.allocator.alloc(u8, hdr_lut_size);
             for (lut, 0..) |*value, index| {
@@ -725,6 +733,15 @@ const NativeDecoder = struct {
                     @as(f64, hdr_lut_size - 1);
                 value.* = @floatCast(hdrToLinear(encoded, transfer_kind));
             }
+            for (self.hdr_compact_linear_lut.?, 0..) |*value, index| {
+                const source_code = @min(
+                    hdr_lut_size - 1,
+                    index << hdr_compact_lut_shift,
+                );
+                const encoded = @as(f64, @floatFromInt(source_code)) /
+                    @as(f64, hdr_lut_size - 1);
+                value.* = @floatCast(hdrToLinear(encoded, transfer_kind));
+            }
             self.hdr_lut_transfer = transfer;
         }
     }
@@ -738,8 +755,9 @@ const NativeDecoder = struct {
                 self.output_stride,
                 @intCast(self.output_dimensions.width),
                 @intCast(self.output_dimensions.height),
-                self.hdr_linear_lut.?.ptr,
+                self.hdr_compact_linear_lut.?.ptr,
                 self.sdr_transfer_lut.?.ptr,
+                hdr_compact_lut_shift,
                 @intFromBool(color.primaries == color_primaries_bt2020),
                 @intFromBool(self.output_format == .gray8),
             );
@@ -885,6 +903,8 @@ const color_transfer_hlg = 18;
 const color_matrix_bt709 = 1;
 const chroma_location_left = 1;
 const hdr_lut_size = std.math.maxInt(u16) + 1;
+const hdr_compact_lut_shift = 4;
+const hdr_compact_lut_size = hdr_lut_size >> hdr_compact_lut_shift;
 
 const HdrTransfer = enum { pq, hlg };
 
