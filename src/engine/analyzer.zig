@@ -194,9 +194,9 @@ const NativeAnalyzer = struct {
         );
         const estimate_optional: ?motion.Estimate =
             self.estimator.estimate(previous, current) catch |err| switch (err) {
-            error.NotEnoughTracks, error.EstimationFailed => null,
-            else => return err,
-        };
+                error.NotEnoughTracks, error.EstimationFailed => null,
+                else => return err,
+            };
 
         const immediate_scene_cut = self.isSceneCut(
             difference,
@@ -365,7 +365,7 @@ fn estimateIsReliable(estimate: motion.Estimate, options: Options) bool {
     return estimate.inlier_points >= options.supported_motion_minimum_inliers and
         inlier_ratio >= options.supported_motion_minimum_inlier_ratio and
         estimate.spatial_coverage >=
-        options.supported_motion_minimum_spatial_coverage and
+            options.supported_motion_minimum_spatial_coverage and
         estimate.residual_px <= options.supported_motion_maximum_residual_px;
 }
 
@@ -380,19 +380,19 @@ fn validateOptions(options: Options) AnalyzerError!void {
         options.supported_motion_minimum_inlier_ratio <= 0 or
         options.supported_motion_minimum_inlier_ratio > 1 or
         !std.math.isFinite(
-        options.supported_motion_minimum_spatial_coverage,
-    ) or
+            options.supported_motion_minimum_spatial_coverage,
+        ) or
         options.supported_motion_minimum_spatial_coverage <= 0 or
         options.supported_motion_minimum_spatial_coverage > 1 or
         !std.math.isFinite(options.supported_motion_maximum_residual_px) or
         options.supported_motion_maximum_residual_px <= 0 or
         !std.math.isFinite(options.hard_scene_cut_tracking_confidence) or
         options.hard_scene_cut_tracking_confidence <
-        options.low_confidence_threshold or
+            options.low_confidence_threshold or
         options.hard_scene_cut_tracking_confidence > 1 or
         !std.math.isFinite(hard_histogram_confidence) or
         hard_histogram_confidence <
-        options.hard_scene_cut_tracking_confidence or
+            options.hard_scene_cut_tracking_confidence or
         hard_histogram_confidence > 1 or
         !std.math.isFinite(options.hard_scene_cut_histogram_distance) or
         options.hard_scene_cut_histogram_distance <= 0 or
@@ -400,21 +400,21 @@ fn validateOptions(options: Options) AnalyzerError!void {
         !std.math.isFinite(options.uncertain_scene_cut_histogram_distance) or
         options.uncertain_scene_cut_histogram_distance <= 0 or
         options.uncertain_scene_cut_histogram_distance >
-        options.hard_scene_cut_histogram_distance or
+            options.hard_scene_cut_histogram_distance or
         !std.math.isFinite(options.hard_scene_cut_pixel_difference) or
         options.hard_scene_cut_pixel_difference <= 0 or
         options.hard_scene_cut_pixel_difference > 1 or
         !std.math.isFinite(options.uncertain_scene_cut_pixel_difference) or
         options.uncertain_scene_cut_pixel_difference <= 0 or
         options.uncertain_scene_cut_pixel_difference >
-        options.hard_scene_cut_pixel_difference or
+            options.hard_scene_cut_pixel_difference or
         !std.math.isFinite(options.gradual_scene_cut_noise_floor) or
         options.gradual_scene_cut_noise_floor < 0 or
         options.gradual_scene_cut_noise_floor >=
-        options.gradual_scene_cut_accumulated_difference or
+            options.gradual_scene_cut_accumulated_difference or
         !std.math.isFinite(
-        options.gradual_scene_cut_accumulated_difference,
-    ) or
+            options.gradual_scene_cut_accumulated_difference,
+        ) or
         options.gradual_scene_cut_accumulated_difference <= 0 or
         options.gradual_scene_cut_accumulated_difference > 1 or
         !std.math.isFinite(options.gradual_scene_cut_decay) or

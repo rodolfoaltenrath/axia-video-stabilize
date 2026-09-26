@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const sync = @import("../utils/sync.zig");
 
 pub const Command = struct {
     path: []const u8,
@@ -15,20 +16,19 @@ pub const Command = struct {
 /// directory and finally PATH. Keeping the bundled lookup here makes preview
 /// and export use exactly the same executable.
 pub fn resolve(allocator: std.mem.Allocator) error{OutOfMemory}!Command {
-    const override = std.process.getEnvVarOwned(
+    const override = sync.getEnvOwned(
         allocator,
         "AXIA_FFMPEG",
     ) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         error.OutOfMemory => return error.OutOfMemory,
-        else => null,
     };
     if (override) |path| {
         if (path.len > 0) return .{ .path = path, .owned_path = path };
         allocator.free(path);
     }
 
-    const executable_dir = std.fs.selfExeDirPathAlloc(allocator) catch |err| switch (err) {
+    const executable_dir = std.process.executableDirPathAlloc(sync.io(), allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .path = defaultCommand() },
     };
@@ -37,7 +37,7 @@ pub fn resolve(allocator: std.mem.Allocator) error{OutOfMemory}!Command {
         allocator,
         &.{ executable_dir, bundledFilename() },
     ) catch return error.OutOfMemory;
-    std.fs.accessAbsolute(candidate, .{}) catch {
+    std.Io.Dir.accessAbsolute(sync.io(), candidate, .{}) catch {
         allocator.free(candidate);
         return .{ .path = defaultCommand() };
     };
@@ -48,6 +48,20 @@ pub fn bundledFilename() []const u8 {
     return if (builtin.os.tag == .windows) "ffmpeg.exe" else "ffmpeg";
 }
 
+/// Stops and reaps an FFmpeg child without waiting indefinitely for a graceful
+/// shutdown. FFmpeg can ignore SIGTERM while blocked writing to a full pipe,
+/// which would make std.process.Child.kill() wait forever on POSIX systems.
+pub fn terminate(child: *std.process.Child) void {
+    if (builtin.os.tag == .windows) {
+        child.kill(sync.io());
+        return;
+    }
+
+    const pid = child.id orelse return;
+    std.posix.kill(pid, .KILL) catch {};
+    _ = child.wait(sync.io()) catch {};
+}
+
 fn defaultCommand() []const u8 {
     return "ffmpeg";
 }
@@ -55,4 +69,20 @@ fn defaultCommand() []const u8 {
 test "bundled executable name follows the target platform" {
     const expected = if (builtin.os.tag == .windows) "ffmpeg.exe" else "ffmpeg";
     try std.testing.expectEqualStrings(expected, bundledFilename());
+}
+
+test "terminate reaps a child blocked on a full pipe" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var child = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", "while :; do printf 0123456789abcdef; done" },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+
+    terminate(&child);
+
+    try std.testing.expectEqual(null, child.id);
 }

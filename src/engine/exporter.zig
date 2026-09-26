@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const diagnostics = @import("diagnostics.zig");
 const encoder_mod = @import("encoder.zig");
 const muxer = @import("muxer.zig");
@@ -40,8 +41,10 @@ pub const Observer = struct {
 };
 
 pub const Options = struct {
+    stabilization_enabled: bool = true,
     session: session_mod.Options = .{},
     encoder: encoder_mod.Options = .{},
+    renderer: renderer.Options = .{},
     muxer: muxer.Options = .{},
     diagnostics_path: ?[]const u8 = null,
     observer: Observer = .{},
@@ -100,6 +103,15 @@ const NativeExporter = struct {
         }
         if (options.observer.isCancelled()) return error.Cancelled;
 
+        if (!options.stabilization_enabled) {
+            return remuxOriginal(
+                allocator,
+                input_path,
+                output_path,
+                options,
+            );
+        }
+
         const video_temp_path = try temporaryPath(
             allocator,
             output_path,
@@ -156,10 +168,11 @@ const NativeExporter = struct {
             .observer = options.observer,
             .total_frames = @intCast(analysis.records.len),
         };
-        renderer.Renderer.run(
+        renderer.Renderer.runWithOptions(
             allocator,
             input_path,
             &analysis,
+            options.renderer,
             .{
                 .context = &sink,
                 .on_frame = EncoderSink.onFrame,
@@ -219,6 +232,49 @@ const NativeExporter = struct {
         };
     }
 };
+
+fn remuxOriginal(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    output_path: []const u8,
+    options: Options,
+) ExportError!Result {
+    const partial_path = try temporaryPath(
+        allocator,
+        output_path,
+        "partial",
+    );
+    defer allocator.free(partial_path);
+    var published = false;
+    defer if (!published) deleteFile(partial_path);
+
+    options.observer.report(.{
+        .stage = .muxing,
+        .stage_progress = 0,
+    });
+    var mux_observer = MuxObserver{ .observer = options.observer };
+    var mux_options = options.muxer;
+    mux_options.observer = .{
+        .context = &mux_observer,
+        .on_progress = MuxObserver.onProgress,
+        .should_cancel = MuxObserver.shouldCancel,
+    };
+    const mux_result = try muxer.Muxer.run(
+        allocator,
+        input_path,
+        input_path,
+        partial_path,
+        mux_options,
+    );
+    if (options.observer.isCancelled()) return error.Cancelled;
+    publishFile(partial_path, output_path) catch return error.PublishFailed;
+    published = true;
+    options.observer.report(.{
+        .stage = .completed,
+        .stage_progress = 1,
+    });
+    return .{ .frames = 0, .audio_streams = mux_result.audio_streams };
+}
 
 const MuxObserver = struct {
     observer: Observer,
@@ -299,9 +355,9 @@ const EncoderSink = struct {
 
 fn deleteFile(path: []const u8) void {
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.deleteFileAbsolute(path) catch {};
+        std.Io.Dir.deleteFileAbsolute(sync.io(), path) catch {};
     } else {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(sync.io(), path) catch {};
     }
 }
 
@@ -313,7 +369,7 @@ fn temporaryPath(
     return std.fmt.allocPrint(
         allocator,
         "{s}.axia-{s}-{x}.mp4",
-        .{ output_path, label, std.crypto.random.int(u64) },
+        .{ output_path, label, @as(u64, @truncate(@as(u128, @bitCast(sync.nanoTimestamp())))) },
     );
 }
 
@@ -321,9 +377,9 @@ fn publishFile(source: []const u8, destination: []const u8) !void {
     if (std.fs.path.isAbsolute(source) and
         std.fs.path.isAbsolute(destination))
     {
-        try std.fs.renameAbsolute(source, destination);
+        try std.Io.Dir.renameAbsolute(source, destination, sync.io());
     } else {
-        try std.fs.cwd().rename(source, destination);
+        try std.Io.Dir.cwd().rename(source, std.Io.Dir.cwd(), destination, sync.io());
     }
 }
 
@@ -331,11 +387,11 @@ test "publishing replaces an existing destination atomically" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
 
-    try temporary.dir.writeFile(.{
+    try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "source.mp4",
         .data = "new-video",
     });
-    try temporary.dir.writeFile(.{
+    try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "destination.mp4",
         .data = "old-video",
     });
@@ -358,15 +414,16 @@ test "publishing replaces an existing destination atomically" {
 
     try publishFile(source, destination);
     const contents = try temporary.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "destination.mp4",
-        64,
+        std.testing.allocator,
+        .limited(64),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings("new-video", contents);
     try std.testing.expectError(
         error.FileNotFound,
-        temporary.dir.openFile("source.mp4", .{}),
+        temporary.dir.openFile(std.testing.io, "source.mp4", .{}),
     );
 }
 

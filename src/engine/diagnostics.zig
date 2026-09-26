@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
 const crop = @import("crop.zig");
 const decoder = @import("decoder.zig");
 const session = @import("session.zig");
@@ -42,17 +43,18 @@ pub fn writeCsv(
     const temporary_path = try std.fmt.allocPrint(
         allocator,
         "{s}.axia-diagnostics-{x}.tmp",
-        .{ path, std.crypto.random.int(u64) },
+        .{ path, @as(u64, @truncate(@as(u128, @bitCast(sync.nanoTimestamp())))) },
     );
     defer allocator.free(temporary_path);
     var published = false;
     defer if (!published) deleteFile(temporary_path);
 
-    var file = createFile(temporary_path) catch return error.WriteFailed;
+    const file = createFile(temporary_path) catch return error.WriteFailed;
     var file_open = true;
-    defer if (file_open) file.close();
-    var buffered = std.io.bufferedWriter(file.writer());
-    const writer = buffered.writer();
+    defer if (file_open) file.close(sync.io());
+    var write_buffer: [64 * 1024]u8 = undefined;
+    var file_writer = file.writer(sync.io(), &write_buffer);
+    const writer = &file_writer.interface;
     writer.writeAll(header) catch return error.WriteFailed;
 
     for (
@@ -106,27 +108,27 @@ pub fn writeCsv(
             },
         ) catch return error.WriteFailed;
     }
-    buffered.flush() catch return error.WriteFailed;
-    file.sync() catch return error.WriteFailed;
-    file.close();
+    writer.flush() catch return error.WriteFailed;
+    file.sync(sync.io()) catch return error.WriteFailed;
+    file.close(sync.io());
     file_open = false;
 
     publishFile(temporary_path, path) catch return error.PublishFailed;
     published = true;
 }
 
-fn createFile(path: []const u8) !std.fs.File {
+fn createFile(path: []const u8) !std.Io.File {
     if (std.fs.path.isAbsolute(path)) {
-        return std.fs.createFileAbsolute(path, .{});
+        return std.Io.Dir.createFileAbsolute(sync.io(), path, .{});
     }
-    return std.fs.cwd().createFile(path, .{});
+    return std.Io.Dir.cwd().createFile(sync.io(), path, .{});
 }
 
 fn deleteFile(path: []const u8) void {
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.deleteFileAbsolute(path) catch {};
+        std.Io.Dir.deleteFileAbsolute(sync.io(), path) catch {};
     } else {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(sync.io(), path) catch {};
     }
 }
 
@@ -134,9 +136,9 @@ fn publishFile(source: []const u8, destination: []const u8) !void {
     if (std.fs.path.isAbsolute(source) and
         std.fs.path.isAbsolute(destination))
     {
-        try std.fs.renameAbsolute(source, destination);
+        try std.Io.Dir.renameAbsolute(source, destination, sync.io());
     } else {
-        try std.fs.cwd().rename(source, destination);
+        try std.Io.Dir.cwd().rename(source, std.Io.Dir.cwd(), destination, sync.io());
     }
 }
 
@@ -195,9 +197,10 @@ test "diagnostic CSV contains analysis and stabilization metrics" {
 
     try writeCsv(std.testing.allocator, path, &analysis);
     const contents = try temporary.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "diagnostics.csv",
-        16 * 1024,
+        std.testing.allocator,
+        .limited(16 * 1024),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.startsWith(u8, contents, header));

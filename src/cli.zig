@@ -3,16 +3,18 @@ const app_state = @import("app_state.zig");
 const build_options = @import("build_options");
 const media = @import("core/media.zig");
 const engine = @import("engine/engine.zig");
+const sync = @import("utils/sync.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    sync.init(init.io, init.environ_map);
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
-        try std.io.getStdOut().writer().print("axia-cli {s}\n", .{build_options.version});
+        var stdout_buffer: [256]u8 = undefined;
+        var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+        try stdout_writer.interface.print("axia-cli {s}\n", .{build_options.version});
+        try stdout_writer.interface.flush();
         return;
     }
     if (args.len == 2 and
@@ -65,6 +67,7 @@ pub fn main() !void {
         output_path,
         .{
             .diagnostics_path = diagnostics_path,
+            .renderer = .{ .interpolation = .linear },
             .observer = .{
                 .context = &progress,
                 .on_progress = CliProgress.onProgress,

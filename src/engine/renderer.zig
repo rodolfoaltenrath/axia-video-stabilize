@@ -1,6 +1,11 @@
 const std = @import("std");
+const sync = @import("../utils/sync.zig");
+const editor_time = @import("../editor/time.zig");
+const effect_mod = @import("../effects/effect.zig");
 const decoder_mod = @import("decoder.zig");
+const frame_pipeline = @import("frame_pipeline.zig");
 const session_mod = @import("session.zig");
+const ffmpeg_command = @import("../platform/ffmpeg_command.zig");
 const types = @import("types.zig");
 const warp = @import("warp.zig");
 
@@ -32,6 +37,18 @@ pub const Observer = struct {
     }
 };
 
+pub const Options = struct {
+    interpolation: warp.Interpolation = .cubic,
+    hdr_tone_mapping: HdrToneMapping = .ffmpeg_mobius,
+};
+
+/// The FFmpeg route uses the same Mobius tone mapping as the preview proxy.
+/// Native ACES remains available for callers that require the former output.
+pub const HdrToneMapping = enum {
+    ffmpeg_mobius,
+    native_aces,
+};
+
 pub const RenderError = error{
     BackendNotEnabled,
     Cancelled,
@@ -42,8 +59,86 @@ pub const RenderError = error{
     PixelFormatMismatch,
     SinkFailed,
     SizeOverflow,
+    FfmpegToneMappingFailed,
 } || decoder_mod.DecoderError || session_mod.SessionError ||
-    warp.WarpError || std.mem.Allocator.Error;
+    frame_pipeline.Error || warp.WarpError || std.mem.Allocator.Error ||
+    std.Thread.SpawnError;
+
+const CompatibilityPrepared = struct {
+    analysis: *const session_mod.Analysis,
+
+    fn stabilizationMatrix(
+        raw_context: ?*anyopaque,
+        lookup: frame_pipeline.StabilizationLookup,
+    ) frame_pipeline.PreparedError!warp.AffineMatrix {
+        const self: *CompatibilityPrepared = @ptrCast(@alignCast(raw_context.?));
+        const frame_index = lookup.frame_index orelse
+            return error.InvalidPreparedEffect;
+        if (lookup.width != self.analysis.video_info.source.width or
+            lookup.height != self.analysis.video_info.source.height)
+        {
+            return error.InvalidPreparedEffect;
+        }
+        return self.analysis.renderMatrix(frame_index) catch
+            return error.InvalidPreparedEffect;
+    }
+};
+
+const RenderJob = struct {
+    analysis: *const session_mod.Analysis,
+    observer: Observer,
+    options: Options,
+    frame: Frame,
+    frame_index: usize,
+    output_pixels: []u8,
+    output_stride: usize,
+    result: ?RenderError = null,
+
+    fn run(self: *RenderJob) void {
+        self.execute() catch |err| {
+            self.result = err;
+        };
+    }
+
+    fn execute(self: *RenderJob) RenderError!void {
+        if (self.observer.isCancelled()) return error.Cancelled;
+        const source_time = try editor_time.Time.fromUnits(
+            self.frame.timing.pts,
+            self.frame.timing.time_base.numerator,
+            self.frame.timing.time_base.denominator,
+        );
+        const compatibility_effects = [_]effect_mod.Effect{
+            .{ .stabilization = .{} },
+        };
+        var prepared = CompatibilityPrepared{ .analysis = self.analysis };
+        try frame_pipeline.processBgra(
+            self.frame.pixels,
+            self.frame.stride,
+            self.output_pixels,
+            self.output_stride,
+            .{
+                .clip_id = 0,
+                .source_time = source_time,
+                .frame_index = self.frame_index,
+                .width = self.frame.width,
+                .height = self.frame.height,
+            },
+            &compatibility_effects,
+            .{
+                .context = &prepared,
+                .interpolation = self.options.interpolation,
+                .stabilization_matrix = CompatibilityPrepared.stabilizationMatrix,
+            },
+        );
+        if (!self.observer.submit(.{
+            .timing = self.frame.timing,
+            .pixels = self.output_pixels,
+            .width = self.frame.width,
+            .height = self.frame.height,
+            .stride = self.output_stride,
+        })) return error.SinkFailed;
+    }
+};
 
 pub const Renderer = if (native_enabled) NativeRenderer else DisabledRenderer;
 
@@ -54,9 +149,20 @@ const DisabledRenderer = struct {
         analysis: *const session_mod.Analysis,
         observer: Observer,
     ) RenderError!void {
+        return runWithOptions(allocator, input_path, analysis, .{}, observer);
+    }
+
+    pub fn runWithOptions(
+        allocator: std.mem.Allocator,
+        input_path: []const u8,
+        analysis: *const session_mod.Analysis,
+        options: Options,
+        observer: Observer,
+    ) RenderError!void {
         _ = allocator;
         _ = input_path;
         _ = analysis;
+        _ = options;
         _ = observer;
         return error.BackendNotEnabled;
     }
@@ -71,6 +177,16 @@ const NativeRenderer = struct {
         analysis: *const session_mod.Analysis,
         observer: Observer,
     ) RenderError!void {
+        return runWithOptions(allocator, input_path, analysis, .{}, observer);
+    }
+
+    pub fn runWithOptions(
+        allocator: std.mem.Allocator,
+        input_path: []const u8,
+        analysis: *const session_mod.Analysis,
+        options: Options,
+        observer: Observer,
+    ) RenderError!void {
         if (observer.isCancelled()) return error.Cancelled;
         var decoder = try decoder_mod.Decoder.open(
             allocator,
@@ -82,6 +198,15 @@ const NativeRenderer = struct {
             decoder.info.source.height != analysis.video_info.source.height)
         {
             return error.VideoDimensionsMismatch;
+        }
+        if (decoder.info.source_is_hdr and options.hdr_tone_mapping == .ffmpeg_mobius) {
+            return runFfmpegToneMapped(
+                allocator,
+                input_path,
+                analysis,
+                options,
+                observer,
+            );
         }
 
         const stride = std.math.mul(
@@ -96,45 +221,60 @@ const NativeRenderer = struct {
         ) catch return error.SizeOverflow;
         const output_pixels = try allocator.alloc(u8, buffer_size);
         defer allocator.free(output_pixels);
+        var replacement_pixels = try allocator.alloc(
+            u8,
+            decoder.outputBufferCapacity(),
+        );
+        defer allocator.free(replacement_pixels);
 
         var rendered_count: usize = 0;
-        while (try decoder.readFrame()) |frame| {
+        var pending_frame = try decoder.readFrame();
+        while (pending_frame) |decoded_frame| {
             if (observer.isCancelled()) return error.Cancelled;
             if (rendered_count >= analysis.records.len) {
                 return error.FrameCountMismatch;
             }
-            if (frame.timing.index != @as(u64, @intCast(rendered_count))) {
+            if (decoded_frame.timing.index != @as(u64, @intCast(rendered_count))) {
                 return error.UnexpectedFrameIndex;
             }
-            if (frame.format != .bgra8) return error.PixelFormatMismatch;
+            if (decoded_frame.format != .bgra8) return error.PixelFormatMismatch;
             const expected_timing = analysis.records[rendered_count].timing;
-            if (frame.timing.pts != expected_timing.pts or
-                frame.timing.time_base.numerator !=
-                expected_timing.time_base.numerator or
-                frame.timing.time_base.denominator !=
-                expected_timing.time_base.denominator)
+            if (decoded_frame.timing.pts != expected_timing.pts or
+                decoded_frame.timing.time_base.numerator !=
+                    expected_timing.time_base.numerator or
+                decoded_frame.timing.time_base.denominator !=
+                    expected_timing.time_base.denominator)
             {
                 return error.TimingMismatch;
             }
-            const matrix = try analysis.renderMatrix(rendered_count);
-            try warp.warpBgra(
-                frame.pixels,
-                frame.stride,
-                output_pixels,
-                stride,
-                frame.width,
-                frame.height,
-                matrix,
+
+            const source_pixels = try decoder.exchangeOutputBuffer(
+                replacement_pixels,
             );
-            if (!observer.submit(.{
-                .timing = frame.timing,
-                .pixels = output_pixels,
-                .width = frame.width,
-                .height = frame.height,
-                .stride = stride,
-            })) {
-                return error.SinkFailed;
-            }
+            var job = RenderJob{
+                .analysis = analysis,
+                .observer = observer,
+                .options = options,
+                .frame = .{
+                    .timing = decoded_frame.timing,
+                    .pixels = source_pixels,
+                    .width = decoded_frame.width,
+                    .height = decoded_frame.height,
+                    .stride = decoded_frame.stride,
+                },
+                .frame_index = rendered_count,
+                .output_pixels = output_pixels,
+                .output_stride = stride,
+            };
+            const worker = std.Thread.spawn(.{}, RenderJob.run, .{&job}) catch |err| {
+                replacement_pixels = source_pixels;
+                return err;
+            };
+            const next_result = decoder.readFrame();
+            worker.join();
+            replacement_pixels = source_pixels;
+            if (job.result) |err| return err;
+            pending_frame = try next_result;
             rendered_count += 1;
         }
         if (rendered_count != analysis.records.len) {
@@ -142,3 +282,138 @@ const NativeRenderer = struct {
         }
     }
 };
+
+const ffmpeg_frame_poll_interval = 100 * sync.ns_per_ms;
+
+fn runFfmpegToneMapped(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    analysis: *const session_mod.Analysis,
+    options: Options,
+    observer: Observer,
+) RenderError!void {
+    const width = analysis.video_info.source.width;
+    const height = analysis.video_info.source.height;
+    if (width == 0 or height == 0) return error.VideoDimensionsMismatch;
+    const stride = std.math.mul(
+        usize,
+        @as(usize, width),
+        decoder_mod.PixelFormat.bgra8.bytesPerPixel(),
+    ) catch return error.SizeOverflow;
+    const buffer_size = std.math.mul(usize, stride, @as(usize, height)) catch
+        return error.SizeOverflow;
+
+    var command = ffmpeg_command.resolve(allocator) catch
+        return error.FfmpegToneMappingFailed;
+    defer command.deinit(allocator);
+    const filter = "zscale=transfer=linear:npl=100,format=gbrpf32le," ++
+        "zscale=primaries=bt709,tonemap=tonemap=mobius:desat=0," ++
+        "zscale=transfer=bt709:matrix=bt709:range=limited,format=bgra";
+    const argv = [_][]const u8{
+        command.path,
+        "-hide_banner",
+        "-loglevel",
+        // Hardware decoders can reject a profile and transparently fall back
+        // to software. Those expected diagnostics do not belong in the UI.
+        "fatal",
+        "-nostdin",
+        "-threads",
+        "0",
+        "-filter_threads",
+        "4",
+        "-hwaccel",
+        "auto",
+        "-i",
+        input_path,
+        "-map",
+        "0:v:0",
+        "-vf",
+        filter,
+        "-an",
+        "-sn",
+        "-dn",
+        "-pix_fmt",
+        "bgra",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    };
+    var child = std.process.spawn(sync.io(), .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .inherit,
+        .expand_arg0 = .expand,
+    }) catch return error.FfmpegToneMappingFailed;
+    var child_terminated = false;
+    defer if (!child_terminated) ffmpeg_command.terminate(&child);
+
+    const stdout = child.stdout orelse return error.FfmpegToneMappingFailed;
+    var read_buffer: [64 * 1024]u8 = undefined;
+    var reader = stdout.readerStreaming(sync.io(), &read_buffer);
+    var source_pixels = try allocator.alloc(u8, buffer_size);
+    defer allocator.free(source_pixels);
+    var next_pixels = try allocator.alloc(u8, buffer_size);
+    defer allocator.free(next_pixels);
+    const output_pixels = try allocator.alloc(u8, buffer_size);
+    defer allocator.free(output_pixels);
+
+    var pending = try readFfmpegFrame(observer, &reader, source_pixels);
+    var rendered_count: usize = 0;
+    while (pending != null) {
+        if (rendered_count >= analysis.records.len) return error.FrameCountMismatch;
+        const timing = analysis.records[rendered_count].timing;
+        var job = RenderJob{
+            .analysis = analysis,
+            .observer = observer,
+            .options = options,
+            .frame = .{
+                .timing = timing,
+                .pixels = source_pixels,
+                .width = width,
+                .height = height,
+                .stride = stride,
+            },
+            .frame_index = rendered_count,
+            .output_pixels = output_pixels,
+            .output_stride = stride,
+        };
+        const worker = std.Thread.spawn(.{}, RenderJob.run, .{&job}) catch
+            return error.FfmpegToneMappingFailed;
+        const next = readFfmpegFrame(observer, &reader, next_pixels);
+        worker.join();
+        if (job.result) |err| return err;
+        pending = try next;
+        std.mem.swap([]u8, &source_pixels, &next_pixels);
+        rendered_count += 1;
+    }
+    if (rendered_count != analysis.records.len) return error.FrameCountMismatch;
+
+    const term = child.wait(sync.io()) catch return error.FfmpegToneMappingFailed;
+    child_terminated = true;
+    const success = switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!success) return error.FfmpegToneMappingFailed;
+}
+
+fn readFfmpegFrame(
+    observer: Observer,
+    reader: *std.Io.File.Reader,
+    destination: []u8,
+) RenderError!?void {
+    var offset: usize = 0;
+    while (offset < destination.len) {
+        if (observer.isCancelled()) return error.Cancelled;
+        const read = sync.readWithTimeout(
+            reader,
+            destination[offset..],
+            ffmpeg_frame_poll_interval,
+        ) catch return error.FfmpegToneMappingFailed;
+        const count = read orelse continue;
+        if (count == 0) return if (offset == 0) null else error.FfmpegToneMappingFailed;
+        offset += count;
+    }
+    return {};
+}

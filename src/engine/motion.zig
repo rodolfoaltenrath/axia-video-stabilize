@@ -198,7 +198,7 @@ pub const Estimator = struct {
         };
         if (!self.adaptiveRetryWouldChange(used_relaxed_detection) or
             initial_estimate.confidence >=
-            self.options.feature_retry_confidence_threshold)
+                self.options.feature_retry_confidence_threshold)
         {
             return initial_estimate;
         }
@@ -461,7 +461,7 @@ pub const Estimator = struct {
                 current_point.y < 0 or current_point.y >= height or
                 !std.math.isFinite(self.forward_errors[index]) or
                 self.forward_errors[index] >
-                self.options.optical_flow.max_forward_error or
+                    self.options.optical_flow.max_forward_error or
                 fb_error_squared > maximum_fb_error_squared)
             {
                 continue;

@@ -1,5 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const editor_time = @import("../editor/time.zig");
 const types = @import("types.zig");
 
 const ffmpeg = if (build_options.native_ffmpeg) @cImport({
@@ -9,6 +10,10 @@ const ffmpeg = if (build_options.native_ffmpeg) @cImport({
     @cInclude("libavutil/display.h");
     @cInclude("libavutil/pixdesc.h");
     @cInclude("libswscale/swscale.h");
+}) else struct {};
+
+const cv = if (build_options.native_opencv) @cImport({
+    @cInclude("opencv_bridge.h");
 }) else struct {};
 
 pub const native_enabled = build_options.native_ffmpeg;
@@ -28,7 +33,9 @@ pub const DecoderError = error{
     MissingTimestamp,
     UnsupportedResolutionChange,
     ConversionFailed,
-} || std.mem.Allocator.Error;
+    InvalidSeekTime,
+    SeekFailed,
+} || editor_time.Error || std.mem.Allocator.Error;
 
 pub const Options = struct {
     max_analysis_dimension: u32 = 960,
@@ -83,6 +90,8 @@ pub const VideoInfo = struct {
     frame_rate: ?types.Rational,
     duration_seconds: ?f64,
     estimated_frame_count: ?u64,
+    bit_rate: ?u64 = null,
+    source_is_hdr: bool = false,
 
     pub fn framesPerSecond(self: VideoInfo) ?f64 {
         const rate = self.frame_rate orelse return null;
@@ -201,6 +210,21 @@ const DisabledDecoder = struct {
         _ = self;
         return error.BackendNotEnabled;
     }
+
+    pub fn seekTo(self: *DisabledDecoder, target: editor_time.Time) DecoderError!void {
+        _ = self;
+        _ = target;
+        return error.BackendNotEnabled;
+    }
+
+    pub fn readFrameAtOrAfter(
+        self: *DisabledDecoder,
+        target: editor_time.Time,
+    ) DecoderError!?FrameView {
+        _ = self;
+        _ = target;
+        return error.BackendNotEnabled;
+    }
 };
 
 const NativeDecoder = struct {
@@ -220,6 +244,7 @@ const NativeDecoder = struct {
     output_stride: usize,
     hdr_pixels: ?[]u16 = null,
     hdr_linear_lut: ?[]f32 = null,
+    hdr_compact_linear_lut: ?[]f32 = null,
     sdr_transfer_lut: ?[]u8 = null,
     hdr_lut_transfer: i32 = color_transfer_unspecified,
     next_index: u64 = 0,
@@ -353,29 +378,35 @@ const NativeDecoder = struct {
         );
         const frame_rate: ?types.Rational =
             if (guessed_rate.num > 0 and guessed_rate.den > 0)
-            .{
-                .numerator = guessed_rate.num,
-                .denominator = guessed_rate.den,
-            }
-        else
-            null;
+                .{
+                    .numerator = guessed_rate.num,
+                    .denominator = guessed_rate.den,
+                }
+            else
+                null;
         const duration_seconds: ?f64 =
             if (stream.*.duration != ffmpeg.AV_NOPTS_VALUE and
             stream.*.duration > 0)
-            @as(f64, @floatFromInt(stream.*.duration)) *
-                @as(f64, @floatFromInt(stream.*.time_base.num)) /
-                @as(f64, @floatFromInt(stream.*.time_base.den))
-        else if (format_context.duration != ffmpeg.AV_NOPTS_VALUE and
+                @as(f64, @floatFromInt(stream.*.duration)) *
+                    @as(f64, @floatFromInt(stream.*.time_base.num)) /
+                    @as(f64, @floatFromInt(stream.*.time_base.den))
+            else if (format_context.duration != ffmpeg.AV_NOPTS_VALUE and
             format_context.duration > 0)
-            @as(f64, @floatFromInt(format_context.duration)) /
-                @as(f64, ffmpeg.AV_TIME_BASE)
-        else
-            null;
+                @as(f64, @floatFromInt(format_context.duration)) /
+                    @as(f64, ffmpeg.AV_TIME_BASE)
+            else
+                null;
         const estimated_frame_count = estimateFrameCount(
             stream.*.nb_frames,
             frame_rate,
             duration_seconds,
         );
+        const bit_rate: ?u64 = if (codec_context.bit_rate > 0)
+            @intCast(codec_context.bit_rate)
+        else if (format_context.bit_rate > 0)
+            @intCast(format_context.bit_rate)
+        else
+            null;
         const source_color = ColorInfo{
             .range = @intCast(codec_context.color_range),
             .primaries = @intCast(codec_context.color_primaries),
@@ -403,6 +434,8 @@ const NativeDecoder = struct {
                 .frame_rate = frame_rate,
                 .duration_seconds = duration_seconds,
                 .estimated_frame_count = estimated_frame_count,
+                .bit_rate = bit_rate,
+                .source_is_hdr = hdrTransfer(source_color.transfer) != null,
             },
             .output_dimensions = output_dimensions,
             .output_format = options.output_format,
@@ -415,6 +448,7 @@ const NativeDecoder = struct {
     pub fn deinit(self: *NativeDecoder) void {
         if (self.sws_context) |context| ffmpeg.sws_freeContext(context);
         if (self.sdr_transfer_lut) |lut| self.allocator.free(lut);
+        if (self.hdr_compact_linear_lut) |lut| self.allocator.free(lut);
         if (self.hdr_linear_lut) |lut| self.allocator.free(lut);
         if (self.hdr_pixels) |pixels| self.allocator.free(pixels);
 
@@ -429,6 +463,25 @@ const NativeDecoder = struct {
 
         self.allocator.free(self.output_pixels);
         self.* = undefined;
+    }
+
+    /// Replaces the reusable conversion buffer and transfers ownership of the
+    /// previous one to the caller. This lets the renderer process one decoded
+    /// frame while the decoder fills the next buffer without copying a frame.
+    pub fn exchangeOutputBuffer(
+        self: *NativeDecoder,
+        replacement: []u8,
+    ) DecoderError![]u8 {
+        if (replacement.len != self.output_pixels.len) {
+            return error.ConversionFailed;
+        }
+        const previous = self.output_pixels;
+        self.output_pixels = replacement;
+        return previous;
+    }
+
+    pub fn outputBufferCapacity(self: *const NativeDecoder) usize {
+        return self.output_pixels.len;
     }
 
     pub fn readFrame(self: *NativeDecoder) DecoderError!?FrameView {
@@ -479,6 +532,53 @@ const NativeDecoder = struct {
                 break;
             }
         }
+    }
+
+    /// Seeks to the keyframe at or before `target`. The next decoded frame may
+    /// precede the target; use `readFrameAtOrAfter` when that distinction
+    /// matters. Frame indices restart at zero after every seek.
+    pub fn seekTo(
+        self: *NativeDecoder,
+        target: editor_time.Time,
+    ) DecoderError!void {
+        if (target.ticks < 0) return error.InvalidSeekTime;
+        const timestamp = try target.toUnits(
+            self.info.time_base.numerator,
+            self.info.time_base.denominator,
+            .floor,
+        );
+        if (ffmpeg.av_seek_frame(
+            self.format_context,
+            self.video_stream_index,
+            timestamp,
+            ffmpeg.AVSEEK_FLAG_BACKWARD,
+        ) < 0) {
+            return error.SeekFailed;
+        }
+        ffmpeg.avcodec_flush_buffers(self.codec_context);
+        ffmpeg.av_packet_unref(self.packet);
+        ffmpeg.av_frame_unref(self.frame);
+        self.next_index = 0;
+        self.draining = false;
+        self.finished = false;
+    }
+
+    /// Returns the first presentation frame whose PTS is equal to or later
+    /// than `target`, which also works for variable-frame-rate sources.
+    pub fn readFrameAtOrAfter(
+        self: *NativeDecoder,
+        target: editor_time.Time,
+    ) DecoderError!?FrameView {
+        try self.seekTo(target);
+        while (try self.readFrame()) |frame| {
+            const frame_time = try editor_time.Time.fromUnits(
+                frame.timing.pts,
+                frame.timing.time_base.numerator,
+                frame.timing.time_base.denominator,
+            );
+            if (frame_time.compare(target) != .lt) return frame;
+        }
+        return null;
     }
 
     fn convertCurrentFrame(self: *NativeDecoder) DecoderError!FrameView {
@@ -611,6 +711,12 @@ const NativeDecoder = struct {
         if (self.hdr_linear_lut == null) {
             self.hdr_linear_lut = try self.allocator.alloc(f32, hdr_lut_size);
         }
+        if (self.hdr_compact_linear_lut == null) {
+            self.hdr_compact_linear_lut = try self.allocator.alloc(
+                f32,
+                hdr_compact_lut_size,
+            );
+        }
         if (self.sdr_transfer_lut == null) {
             const lut = try self.allocator.alloc(u8, hdr_lut_size);
             for (lut, 0..) |*value, index| {
@@ -627,11 +733,40 @@ const NativeDecoder = struct {
                     @as(f64, hdr_lut_size - 1);
                 value.* = @floatCast(hdrToLinear(encoded, transfer_kind));
             }
+            for (self.hdr_compact_linear_lut.?, 0..) |*value, index| {
+                const source_code = @min(
+                    hdr_lut_size - 1,
+                    index << hdr_compact_lut_shift,
+                );
+                const encoded = @as(f64, @floatFromInt(source_code)) /
+                    @as(f64, hdr_lut_size - 1);
+                value.* = @floatCast(hdrToLinear(encoded, transfer_kind));
+            }
             self.hdr_lut_transfer = transfer;
         }
     }
 
     fn toneMapHdr(self: *NativeDecoder, color: ColorInfo) void {
+        if (build_options.native_opencv) {
+            const status = cv.axia_cv_tone_map_hdr_bgra16(
+                self.hdr_pixels.?.ptr,
+                @as(usize, self.output_dimensions.width) * 4 * @sizeOf(u16),
+                self.output_pixels.ptr,
+                self.output_stride,
+                @intCast(self.output_dimensions.width),
+                @intCast(self.output_dimensions.height),
+                self.hdr_compact_linear_lut.?.ptr,
+                self.sdr_transfer_lut.?.ptr,
+                hdr_compact_lut_shift,
+                @intFromBool(color.primaries == color_primaries_bt2020),
+                @intFromBool(self.output_format == .gray8),
+            );
+            if (status == cv.AXIA_CV_OK) return;
+        }
+        self.toneMapHdrScalar(color);
+    }
+
+    fn toneMapHdrScalar(self: *NativeDecoder, color: ColorInfo) void {
         const source = self.hdr_pixels.?;
         const linear_lut = self.hdr_linear_lut.?;
         const transfer_lut = self.sdr_transfer_lut.?;
@@ -768,6 +903,8 @@ const color_transfer_hlg = 18;
 const color_matrix_bt709 = 1;
 const chroma_location_left = 1;
 const hdr_lut_size = std.math.maxInt(u16) + 1;
+const hdr_compact_lut_shift = 4;
+const hdr_compact_lut_size = hdr_lut_size >> hdr_compact_lut_shift;
 
 const HdrTransfer = enum { pq, hlg };
 
@@ -974,4 +1111,35 @@ test "swscale matrix follows metadata and resolution fallback" {
         @as(c_int, ffmpeg.SWS_CS_DEFAULT),
         swsMatrix(2, .{ .width = 640, .height = 480 }),
     );
+}
+
+test "native decoder seeks to the first frame at or after a rational time" {
+    if (!native_enabled or build_options.test_video.len == 0) {
+        return error.SkipZigTest;
+    }
+    var decoder = try Decoder.open(
+        std.testing.allocator,
+        build_options.test_video,
+        .{ .output_format = .gray8 },
+    );
+    defer decoder.deinit();
+
+    var target: ?editor_time.Time = null;
+    for (0..10) |_| {
+        const frame = (try decoder.readFrame()) orelse break;
+        target = try editor_time.Time.fromUnits(
+            frame.timing.pts,
+            frame.timing.time_base.numerator,
+            frame.timing.time_base.denominator,
+        );
+    }
+    const requested = target orelse return error.SkipZigTest;
+    const selected = (try decoder.readFrameAtOrAfter(requested)) orelse
+        return error.TestUnexpectedResult;
+    const selected_time = try editor_time.Time.fromUnits(
+        selected.timing.pts,
+        selected.timing.time_base.numerator,
+        selected.timing.time_base.denominator,
+    );
+    try std.testing.expect(selected_time.compare(requested) != .lt);
 }

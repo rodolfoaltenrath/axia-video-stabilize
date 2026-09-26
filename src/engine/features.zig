@@ -15,7 +15,7 @@ pub const Point = extern struct {
 comptime {
     if (native_enabled and
         (@sizeOf(Point) != @sizeOf(cv.AxiaPoint2f) or
-        @alignOf(Point) != @alignOf(cv.AxiaPoint2f)))
+            @alignOf(Point) != @alignOf(cv.AxiaPoint2f)))
     {
         @compileError("AxiaPoint2f ABI differs between Zig and the OpenCV bridge");
     }

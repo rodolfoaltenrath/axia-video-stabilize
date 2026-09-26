@@ -5,17 +5,14 @@ const app_state = @import("app_state.zig");
 const media = @import("core/media.zig");
 const file_dialog = @import("platform/file_dialog.zig");
 const thread_pool = @import("utils/thread_pool.zig");
+const sync = @import("utils/sync.zig");
 const fonts = @import("ui/fonts.zig");
 const preview_player = @import("ui/preview_player.zig");
 const window = @import("ui/window.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        const leak_status = gpa.deinit();
-        if (leak_status == .leak) std.log.err("memory leak detected", .{});
-    }
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    sync.init(init.io, init.environ_map);
 
     var state = app_state.AppState{};
     const workers = try thread_pool.ThreadPool.create(allocator, &state);
@@ -30,7 +27,7 @@ pub fn main() !void {
     var title_buffer: [128]u8 = undefined;
     const window_title = try std.fmt.bufPrintZ(
         &title_buffer,
-        "Axia {s} - Estabilização de Vídeo",
+        "Axia Editor {s}",
         .{build_options.version},
     );
     rl.initWindow(1280, 720, window_title);
@@ -45,7 +42,7 @@ pub fn main() !void {
     defer preview.deinit();
     var import_selector = file_dialog.AsyncSelector.init(allocator);
     defer import_selector.deinit();
-    try importInitialArgument(allocator, &state, &preview);
+    try importInitialArgument(init.minimal.args, init.arena.allocator(), &state, &preview);
 
     while (!rl.windowShouldClose()) {
         if (rl.isFileDropped()) handleDroppedFiles(&state, &preview);
@@ -107,12 +104,12 @@ fn finishImport(
 }
 
 fn importInitialArgument(
+    process_args: std.process.Args,
     allocator: std.mem.Allocator,
     state: *app_state.AppState,
     preview: *preview_player.Player,
 ) !void {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try process_args.toSlice(allocator);
     if (args.len <= 1) return;
     if (args.len != 2 or std.mem.startsWith(u8, args[1], "--")) {
         state.setMessage("Para abrir pela linha de comando, informe apenas o caminho de um vídeo.");
@@ -173,10 +170,10 @@ fn loadMedia(state: *app_state.AppState, input_path: []const u8) bool {
         return false;
     };
     const input_exists = if (std.fs.path.isAbsolute(input_path)) blk: {
-        std.fs.accessAbsolute(input_path, .{}) catch break :blk false;
+        std.Io.Dir.accessAbsolute(sync.io(), input_path, .{}) catch break :blk false;
         break :blk true;
     } else blk: {
-        std.fs.cwd().access(input_path, .{}) catch break :blk false;
+        std.Io.Dir.cwd().access(sync.io(), input_path, .{}) catch break :blk false;
         break :blk true;
     };
     if (!input_exists) {

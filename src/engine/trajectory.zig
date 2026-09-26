@@ -452,7 +452,7 @@ pub fn smoothTimedAroundPivot(
         while (sample_index > 0 and
             poses[sample_index - 1].segment == pose.segment and
             pose.timestamp_seconds -
-            poses[sample_index - 1].timestamp_seconds <= radius_seconds)
+                poses[sample_index - 1].timestamp_seconds <= radius_seconds)
         {
             sample_index -= 1;
         }

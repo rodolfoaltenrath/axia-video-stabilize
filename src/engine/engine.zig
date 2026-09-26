@@ -12,9 +12,13 @@ pub const crop = @import("crop.zig");
 pub const session = @import("session.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const renderer = @import("renderer.zig");
+pub const frame_pipeline = @import("frame_pipeline.zig");
+pub const project_decoder = @import("project_decoder.zig");
+pub const project_renderer = @import("project_renderer.zig");
 pub const encoder = @import("encoder.zig");
 pub const muxer = @import("muxer.zig");
 pub const exporter = @import("exporter.zig");
+pub const stabilization_effect = @import("stabilization_effect.zig");
 
 pub const native_dependencies_enabled =
     build_options.native_ffmpeg and build_options.native_opencv;

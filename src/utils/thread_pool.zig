@@ -1,7 +1,24 @@
 const std = @import("std");
+const sync = @import("sync.zig");
 const state_mod = @import("../app_state.zig");
 const media = @import("../core/media.zig");
 const engine = @import("../engine/engine.zig");
+
+pub fn buildSessionOptions(
+    parameters: state_mod.Parameters,
+) !engine.session.Options {
+    const effect = parameters.stabilizationEffect();
+    if (!effect.enabled) {
+        // Until the general editor exporter replaces this legacy one-clip
+        // path, radius zero and zero crop produce identity corrections while
+        // preserving the existing encode/mux behavior.
+        return .{
+            .smoothing_radius_seconds = 0,
+            .crop = .{ .mode = .static, .extra_crop_fraction = 0 },
+        };
+    }
+    return engine.stabilization_effect.sessionOptions(effect);
+}
 
 const Job = union(enum) {
     stabilize: state_mod.JobConfig,
@@ -13,8 +30,8 @@ const Job = union(enum) {
 pub const ThreadPool = struct {
     allocator: std.mem.Allocator,
     state: *state_mod.AppState,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    condition: sync.Condition = .{},
     pending: ?Job = null,
     stopping: bool = false,
     thread: ?std.Thread = null,
@@ -91,21 +108,15 @@ pub const ThreadPool = struct {
         config: state_mod.JobConfig,
     ) !void {
         try engine.ensureReady();
-        if (config.parameters.mode == .distortion) {
-            return error.DistortionModeNotImplemented;
-        }
-
         self.state.update(.loading, 0.02);
         var progress = NativeProgress{ .state = self.state };
-        const normalized_smoothness =
-            std.math.clamp(config.parameters.smoothness, 0.0, 100.0) / 100.0;
-        const crop_fraction =
-            std.math.clamp(config.parameters.crop, 0.0, 30.0) / 100.0;
+        const session_options = try buildSessionOptions(config.parameters);
         const encoder_profile = config.parameters.export_quality.encoderProfile();
         var output_buffer: [state_mod.max_path_bytes]u8 = undefined;
-        const output_path = try media.deriveAvailableOutputPath(
+        const output_path = try media.deriveAvailableEditorOutputPath(
             &output_buffer,
             config.media.input(),
+            config.parameters.stabilization_enabled,
         );
         if (!self.state.setOutputPath(output_path)) {
             return error.OutputPathTooLong;
@@ -115,19 +126,17 @@ pub const ThreadPool = struct {
             config.media.input(),
             output_path,
             .{
-                .session = .{
-                    .smoothing_radius_seconds = normalized_smoothness * normalized_smoothness * 2.0,
-                    .crop = .{
-                        .mode = if (config.parameters.dynamic_crop)
-                            .dynamic
-                        else
-                            .static,
-                        .extra_crop_fraction = crop_fraction,
-                    },
-                },
+                .stabilization_enabled = config.parameters.stabilization_enabled,
+                .session = session_options,
                 .encoder = .{
                     .crf = encoder_profile.crf,
                     .preset = encoder_profile.preset,
+                },
+                .renderer = .{
+                    .interpolation = if (config.parameters.export_quality == .high)
+                        .cubic
+                    else
+                        .linear,
                 },
                 .observer = .{
                     .context = &progress,
@@ -234,7 +243,7 @@ const NativeProgress = struct {
             return 0;
         }
 
-        const now = std.time.nanoTimestamp();
+        const now = sync.nanoTimestamp();
         if (self.stage == null or self.stage.? != progress.stage or
             self.last_sample_ns == 0)
         {
@@ -246,14 +255,14 @@ const NativeProgress = struct {
         }
 
         const elapsed_ns = now - self.last_sample_ns;
-        if (elapsed_ns < 250 * std.time.ns_per_ms or
+        if (elapsed_ns < 250 * sync.ns_per_ms or
             progress.processed_frames < self.last_sample_frames)
         {
             return self.processing_speed;
         }
 
         const elapsed_seconds = @as(f64, @floatFromInt(elapsed_ns)) /
-            @as(f64, std.time.ns_per_s);
+            @as(f64, sync.ns_per_s);
         const frame_delta = progress.processed_frames -
             self.last_sample_frames;
         const sample = @as(f64, @floatFromInt(frame_delta)) /

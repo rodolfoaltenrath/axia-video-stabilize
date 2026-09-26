@@ -124,18 +124,18 @@ const NativeSession = struct {
         defer analyzer.deinit();
         const initial_video_info = analyzer.videoInfo();
 
-        var records = std.ArrayList(types.AnalysisRecord).init(allocator);
-        defer records.deinit();
+        var records: std.ArrayList(types.AnalysisRecord) = .empty;
+        defer records.deinit(allocator);
         if (initial_video_info.estimated_frame_count) |estimated| {
             if (estimated > std.math.maxInt(usize)) {
                 return error.FrameCountOverflow;
             }
-            try records.ensureTotalCapacity(@intCast(estimated));
+            try records.ensureTotalCapacity(allocator, @intCast(estimated));
         }
 
         while (try analyzer.read()) |record| {
             if (options.observer.isCancelled()) return error.Cancelled;
-            try records.append(record);
+            try records.append(allocator, record);
             options.observer.report(.{
                 .stage = .analyzing,
                 .decoded_frames = @intCast(records.items.len),
@@ -153,7 +153,7 @@ const NativeSession = struct {
             .estimated_frames = @intCast(records.items.len),
         });
 
-        const owned_records = try records.toOwnedSlice();
+        const owned_records = try records.toOwnedSlice(allocator);
         errdefer allocator.free(owned_records);
         const raw_trajectory = try trajectory.integrateAnalysisWithOptions(
             allocator,
