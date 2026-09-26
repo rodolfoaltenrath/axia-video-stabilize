@@ -149,9 +149,10 @@ prioritizes image quality, **Padrão** keeps the engine defaults and **Leve**
 trades some fidelity for a smaller, faster export. During processing, the
 timeline distinguishes analysis, trajectory smoothing, rendering and final
 muxing, and reports measured frames per second with an ETA when enough samples
-are available. HDR tone mapping is parallelized across CPU cores; the standard
-and light profiles use linear affine interpolation while the high profile keeps
-cubic interpolation. During export, decoding the next frame overlaps the
+are available. HDR export uses FFmpeg's Mobius tone mapping, matching the
+preview and attempting available hardware decoding with a transparent software
+fallback. The standard and light profiles use linear affine interpolation while
+the high profile keeps cubic interpolation. During export, decoding the next frame overlaps the
 stabilization and encoding of the current frame through reusable buffers, so
 high-resolution frames are not copied between stages. The application opens
 maximized to match the monitor's available workspace and remains resizable
